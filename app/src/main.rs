@@ -1,14 +1,21 @@
 //! PKG Master: a small window for opening a PS4/PS5 package, converting its
 //! executable to ELF, extracting all of its files, or exporting a package or
-//! decrypted game folder for AnyPS5.
+//! decrypted game folder for AnyPS5, and running a game folder through the
+//! user's own AnyPS5 relinker.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
+use pkgmaster::anyps5::{
+    find_release, launch_command, preflight, run_relinker, settings_path, spawn_piped, stream_lines, Settings, APP_EXE,
+};
 use pkgmaster::binary::fmt_size;
 use pkgmaster::convert::{
     convert_to_elf, default_output_name, export_anyps5, extract_all, load, Input, Loaded, MODULE_DIR,
@@ -46,7 +53,15 @@ enum Msg {
     Loaded(PathBuf, Result<Loaded, Error>),
     Progress(u64, u64, String),
     Done(Result<String, Error>),
+    Log(String),
+    /// The relinker finished; the runtime folder is ready to launch.
+    Relinked(Result<PathBuf, Error>),
+    /// The launched game exited.
+    Exited(String),
 }
+
+/// Most log lines kept in the window.
+const LOG_LIMIT: usize = 5000;
 
 enum Status {
     Info(String),
@@ -64,6 +79,15 @@ struct App {
     status: Status,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
+    settings: Settings,
+    /// Warnings shown before a run: (warnings, game folder, run folder).
+    /// The run starts once the user continues.
+    confirm: Option<(Vec<String>, PathBuf, PathBuf)>,
+    /// The last laid-out AnyPS5 runtime folder.
+    run_dir: Option<PathBuf>,
+    log: Vec<String>,
+    /// The launched game, while it runs.
+    game: Arc<Mutex<Option<Child>>>,
 }
 
 impl App {
@@ -79,6 +103,11 @@ impl App {
             status: Status::Info("Open a .pkg file, or drag one onto this window.".into()),
             tx,
             rx,
+            settings: Settings::load(&settings_path()),
+            confirm: None,
+            run_dir: None,
+            log: Vec::new(),
+            game: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -214,6 +243,121 @@ impl App {
         });
     }
 
+    /// Ask for the AnyPS5 release folder, check it and remember it.
+    fn pick_anyps5(&mut self) -> bool {
+        let mut dialog =
+            rfd::FileDialog::new().set_title("Pick your AnyPS5 folder (the one holding relinker.exe and libs)");
+        if let Some(d) = &self.settings.anyps5_dir {
+            dialog = dialog.set_directory(d);
+        }
+        let Some(dir) = dialog.pick_folder() else { return false };
+        if let Err(e) = find_release(&dir) {
+            self.status = Status::Err(describe_error(&e));
+            return false;
+        }
+        self.settings.anyps5_dir = Some(dir);
+        self.status = match self.settings.save(&settings_path()) {
+            Ok(()) => Status::Ok("AnyPS5 folder saved.".into()),
+            Err(e) => Status::Err(format!("AnyPS5 folder set, but it could not be saved: {}", describe_error(&e))),
+        };
+        true
+    }
+
+    fn run_anyps5(&mut self) {
+        let Some(Input::Folder(root)) = self.loaded.as_ref().and_then(|l| l.input.clone()) else { return };
+        let have_release = self.settings.anyps5_dir.as_deref().is_some_and(|d| find_release(d).is_ok());
+        if !have_release && !self.pick_anyps5() {
+            return;
+        }
+        let pre = match preflight(&root) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = Status::Err(describe_error(&e));
+                return;
+            }
+        };
+        let mut dialog = rfd::FileDialog::new().set_title("Lay out the AnyPS5 run folder inside");
+        if let Some(dir) = root.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(dir) = dialog.pick_folder() else { return };
+        let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "game".into());
+        self.confirm = Some((pre.warnings(), root, dir.join(format!("{name}-anyps5-run"))));
+    }
+
+    fn start_run(&mut self, ctx: &egui::Context, root: PathBuf, out: PathBuf) {
+        let Some(release) = self.settings.anyps5_dir.as_deref().and_then(|d| find_release(d).ok()) else { return };
+        self.log.clear();
+        self.run_dir = None;
+        self.busy = true;
+        self.progress = Some((0, 0, String::new()));
+        self.status = Status::Info("Preparing and running the AnyPS5 relinker…".into());
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        thread::spawn(move || {
+            let progress = |done: u64, total: u64, item: &str| {
+                let _ = tx.send(Msg::Progress(done, total, item.to_string()));
+                ctx.request_repaint();
+            };
+            let log = |line: &str| {
+                let _ = tx.send(Msg::Log(line.to_string()));
+                ctx.request_repaint();
+            };
+            let result = run_relinker(&root, &release, &out, &progress, &log).map(|r| r.out_dir);
+            let _ = tx.send(Msg::Relinked(result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn launch(&mut self, ctx: &egui::Context) {
+        let Some(dir) = self.run_dir.clone() else { return };
+        let mut child = match launch_command(&dir).and_then(spawn_piped) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status = Status::Err(describe_error(&e));
+                return;
+            }
+        };
+        self.log.push(format!("> {APP_EXE} (in {})", dir.display()));
+        let out = child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>);
+        let err = child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>);
+        for pipe in [out, err].into_iter().flatten() {
+            let (tx, ctx) = (self.tx.clone(), ctx.clone());
+            thread::spawn(move || {
+                stream_lines(pipe, &|line: &str| {
+                    let _ = tx.send(Msg::Log(line.to_string()));
+                    ctx.request_repaint();
+                })
+            });
+        }
+        *self.game.lock().unwrap() = Some(child);
+        self.status = Status::Info(format!("{APP_EXE} is running."));
+        let (game, tx, ctx) = (self.game.clone(), self.tx.clone(), ctx.clone());
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(200));
+            let mut guard = game.lock().unwrap();
+            let Some(child) = guard.as_mut() else { break };
+            let msg = match child.try_wait() {
+                Ok(None) => continue,
+                Ok(Some(status)) => format!("{APP_EXE} exited ({status})."),
+                Err(e) => format!("Lost track of {APP_EXE}: {e}"),
+            };
+            *guard = None;
+            let _ = tx.send(Msg::Exited(msg));
+            ctx.request_repaint();
+            break;
+        });
+    }
+
+    fn stop_game(&mut self) {
+        if let Some(child) = self.game.lock().unwrap().as_mut() {
+            let _ = child.kill();
+        }
+    }
+
+    fn game_running(&self) -> bool {
+        self.game.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+
     fn handle_messages(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
@@ -244,6 +388,28 @@ impl App {
                     }
                 }
                 Msg::Progress(done, total, item) => self.progress = Some((done, total, item)),
+                Msg::Log(line) => {
+                    self.log.push(line);
+                    if self.log.len() > LOG_LIMIT {
+                        self.log.drain(..self.log.len() - LOG_LIMIT);
+                    }
+                }
+                Msg::Relinked(result) => {
+                    self.busy = false;
+                    self.progress = None;
+                    self.status = match result {
+                        Ok(dir) => {
+                            let msg = format!("Ready in {}. Press Launch to start {APP_EXE}.", dir.display());
+                            self.run_dir = Some(dir);
+                            Status::Ok(msg)
+                        }
+                        Err(e) => Status::Err(describe_error(&e)),
+                    };
+                }
+                Msg::Exited(m) => {
+                    self.log.push(m.clone());
+                    self.status = Status::Info(m);
+                }
                 Msg::Done(result) => {
                     self.busy = false;
                     self.progress = None;
@@ -320,6 +486,56 @@ impl eframe::App for App {
             ui.add_space(6.0);
         });
 
+        if let Some((warnings, root, out)) = self.confirm.clone() {
+            let mut decision = None;
+            egui::Window::new("Run in AnyPS5")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_max_width(460.0);
+                    for w in &warnings {
+                        ui.label(RichText::new(format!("⚠ {w}")).color(Color32::from_rgb(0xC8, 0x8A, 0x10)));
+                        ui.add_space(4.0);
+                    }
+                    ui.label(format!("The run folder will be {}.", out.display()));
+                    ui.weak("The game folder itself is only read, never changed.");
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(if warnings.is_empty() { "Start" } else { "Continue anyway" }).clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            decision = Some(false);
+                        }
+                    });
+                });
+            match decision {
+                Some(true) => {
+                    self.confirm = None;
+                    self.start_run(ctx, root, out);
+                }
+                Some(false) => self.confirm = None,
+                None => {}
+            }
+        }
+
+        if !self.log.is_empty() {
+            egui::TopBottomPanel::bottom("log").resizable(true).default_height(160.0).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("AnyPS5 log");
+                    if ui.small_button("Clear").clicked() {
+                        self.log.clear();
+                    }
+                });
+                egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+                    for line in &self.log {
+                        ui.label(RichText::new(line).monospace().size(12.0));
+                    }
+                });
+            });
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -382,6 +598,11 @@ impl eframe::App for App {
             let mut do_convert = false;
             let mut do_extract = false;
             let mut do_export = false;
+            let mut do_run = false;
+            let mut do_pick_anyps5 = false;
+            let mut do_launch = false;
+            let mut do_stop = false;
+            let is_folder = matches!(loaded.input, Some(Input::Folder(_)));
             ui.horizontal(|ui| {
                 let label = match (&self.selected, has_files) {
                     (Some(p), true) => format!("Convert {} to ELF…", p.rsplit('/').next().unwrap_or(p)),
@@ -398,6 +619,30 @@ impl eframe::App for App {
                          and HOW-TO-RUN.txt into a folder you pick.",
                     )
                     .clicked();
+            });
+            ui.horizontal(|ui| {
+                let running = self.game_running();
+                do_run = ui
+                    .add_enabled(
+                        ready && is_folder && !running,
+                        egui::Button::new(RichText::new("Run in AnyPS5…").size(15.0)),
+                    )
+                    .on_hover_text(
+                        "Converts the game's executables, runs your AnyPS5 relinker on them and lays out \
+                         app.exe, libs/ and app0/ in a folder you pick.",
+                    )
+                    .on_disabled_hover_text("Needs a decrypted game folder (Open folder…).")
+                    .clicked();
+                let can_launch = !self.busy && !running && self.run_dir.is_some();
+                do_launch = ui.add_enabled(can_launch, egui::Button::new(RichText::new("Launch").size(15.0))).clicked();
+                if running {
+                    do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
+                }
+                do_pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("AnyPS5 folder…")).clicked();
+                match &self.settings.anyps5_dir {
+                    Some(d) => ui.label(RichText::new(d.display().to_string()).monospace().weak()),
+                    None => ui.weak("AnyPS5 folder not set"),
+                };
             });
 
             if has_files && !loaded.files.is_empty() {
@@ -434,6 +679,18 @@ impl eframe::App for App {
             }
             if do_export {
                 self.export(ctx);
+            }
+            if do_pick_anyps5 {
+                self.pick_anyps5();
+            }
+            if do_run {
+                self.run_anyps5();
+            }
+            if do_launch {
+                self.launch(ctx);
+            }
+            if do_stop {
+                self.stop_game();
             }
         });
     }

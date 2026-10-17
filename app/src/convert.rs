@@ -188,11 +188,12 @@ pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
     Ok(Loaded { rows, input: Some(Input::Binary(path.to_path_buf())), files: Vec::new(), default_elf: None, key_problem: None })
 }
 
-/// Open a decrypted game folder. It must have an eboot.bin at the top.
+/// Open a decrypted game folder. It must have an eboot.bin (or, once the
+/// user has decrypted it themselves, an eboot.elf) at the top.
 fn load_folder(root: &Path) -> Result<Loaded> {
-    if !root.join("eboot.bin").is_file() {
+    if !MAIN_EXECUTABLES.iter().any(|e| root.join(e).is_file()) {
         return Err(Error::Conversion(format!(
-            "{} has no eboot.bin; pick the game's top folder (the one holding eboot.bin and sce_sys)",
+            "{} has no eboot.bin or eboot.elf; pick the game's top folder (the one holding eboot and sce_sys)",
             root.display()
         )));
     }
@@ -205,13 +206,18 @@ fn load_folder(root: &Path) -> Result<Loaded> {
         ("Size".to_string(), fmt_size(files.iter().map(|f| f.size).sum())),
         ("Modules".to_string(), format!("{modules} in {MODULE_DIR}/")),
     ];
-    let default_elf = first_elf_candidate(&input, &files)?;
+    // A dump the user decrypted may have eboot.elf instead of eboot.bin.
+    let default_elf = match first_elf_candidate(&input, &files)? {
+        Some(p) if p == MAIN_EXECUTABLES[0] => Some(p),
+        _ if input.sniff(MAIN_EXECUTABLES[1])? => Some(MAIN_EXECUTABLES[1].to_string()),
+        other => other,
+    };
     Ok(Loaded { rows, input: Some(input), files, default_elf, key_problem: None })
 }
 
 /// Every entry under `root`, depth first and sorted, with `/`-separated paths.
 /// Symbolic links are skipped so nothing outside the folder is read.
-fn walk_folder(root: &Path) -> Result<Vec<FileRow>> {
+pub(crate) fn walk_folder(root: &Path) -> Result<Vec<FileRow>> {
     fn visit(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<FileRow>) -> Result<()> {
         if depth > 64 {
             return Ok(());
@@ -435,7 +441,8 @@ fn write_whole(path: &Path, data: &[u8]) -> Result<()> {
 
 /// AnyPS5 looks for a game's modules in this folder beside its executable.
 pub const MODULE_DIR: &str = "sce_module";
-const MAIN_EXECUTABLE: &str = "eboot.bin";
+/// The main executable, best first. A dump the user decrypted may only have eboot.elf.
+const MAIN_EXECUTABLES: [&str; 2] = ["eboot.bin", "eboot.elf"];
 pub const HOW_TO_RUN: &str = "HOW-TO-RUN.txt";
 
 pub struct ExportReport {
@@ -497,10 +504,16 @@ pub fn export_anyps5(input: &Input, out_dir: &Path, progress: Progress) -> Resul
         ));
     }
 
-    let eboot_data = input
-        .read_file(MAIN_EXECUTABLE, progress)?
-        .ok_or_else(|| Error::Conversion(format!("there is no {MAIN_EXECUTABLE} at the top of the input")))?;
-    let eboot = convert_module(&eboot_data).map_err(|e| about(MAIN_EXECUTABLE, e))?;
+    let mut found = None;
+    for name in MAIN_EXECUTABLES {
+        if let Some(data) = input.read_file(name, progress)? {
+            found = Some((name, data));
+            break;
+        }
+    }
+    let (eboot_name, eboot_data) =
+        found.ok_or_else(|| Error::Conversion("there is no eboot.bin or eboot.elf at the top of the input".into()))?;
+    let eboot = convert_module(&eboot_data).map_err(|e| about(eboot_name, e))?;
     drop(eboot_data);
 
     let existed = out_dir.exists();
@@ -518,7 +531,7 @@ pub fn export_anyps5(input: &Input, out_dir: &Path, progress: Progress) -> Resul
     }
 
     let mut warnings = Vec::new();
-    note_conversion("eboot.bin", &eboot, &mut warnings);
+    note_conversion(eboot_name, &eboot, &mut warnings);
     let source = out_dir.join("source");
     let modules_out = source.join(MODULE_DIR);
     fs::create_dir_all(&modules_out)?;
@@ -572,7 +585,7 @@ pub fn export_anyps5(input: &Input, out_dir: &Path, progress: Progress) -> Resul
 }
 
 /// Copy every file under `root` into `dest`. Returns the file count.
-fn copy_folder(root: &Path, dest: &Path, progress: Progress) -> Result<usize> {
+pub(crate) fn copy_folder(root: &Path, dest: &Path, progress: Progress) -> Result<usize> {
     let entries = walk_folder(root)?;
     let total: u64 = entries.iter().filter(|f| !f.is_dir).map(|f| f.size).sum();
     let mut done = 0u64;
