@@ -33,6 +33,8 @@ fn main() -> ExitCode {
     }
     fs::write("relinker-args.txt", args.join("\n")).unwrap();
     println!("mock relinker: {}", args.join(" "));
+    // Progress redrawn in place, as the real relinker does.
+    println!("Instruction scan | eboot.elf |   0%\rInstruction scan | eboot.elf |  57%\rInstruction scan | eboot.elf | 100%");
     eprintln!("mock relinker stderr line");
     if Path::new("app0/mock-fail").exists() {
         eprintln!("mock relinker: failing on purpose");

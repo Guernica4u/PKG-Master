@@ -40,15 +40,20 @@ pub const LIBS_DIR: &str = "libs";
 
 /// The relinker is always run with `--windows`.
 pub const APP_EXE: &str = "app.exe";
+/// Release assets are versioned, e.g. `relinker-v0.1.2.exe`.
+const RELINKER_PREFIX: &str = "relinker";
 #[cfg(windows)]
-const RELINKER: &str = "relinker.exe";
+const RELINKER_EXT: &str = ".exe";
 #[cfg(not(windows))]
-const RELINKER: &str = "relinker";
+const RELINKER_EXT: &str = "";
+/// What gets copied into `libs/`: AnyPS5's system libraries and, on Windows,
+/// the MinGW runtime DLLs they load (libgcc_s_seh-1.dll and friends).
+const LIB_EXTS: [&str; 2] = ["prx", "dll"];
 
 // --------------------------------------------------------------------------
 // Settings
 
-/// Where the AnyPS5 folder choice is remembered: `%APPDATA%\PKG Master\settings.ini`,
+/// Where the AnyPS5 choices are remembered: `%APPDATA%\PKG Master\settings.ini`,
 /// or beside the executable when there is no APPDATA.
 pub fn settings_path() -> PathBuf {
     if let Some(p) = std::env::var_os("PKGMASTER_SETTINGS") {
@@ -65,7 +70,10 @@ pub fn settings_path() -> PathBuf {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
+    /// AnyPS5's release folder (the one holding libs/).
     pub anyps5_dir: Option<PathBuf>,
+    /// The relinker, when it is not inside `anyps5_dir`.
+    pub relinker: Option<PathBuf>,
 }
 
 impl Settings {
@@ -74,10 +82,15 @@ impl Settings {
         let mut s = Settings::default();
         let Ok(text) = fs::read_to_string(path) else { return s };
         for line in text.lines() {
-            if let Some((k, v)) = line.split_once('=') {
-                if k.trim() == "anyps5_dir" && !v.trim().is_empty() {
-                    s.anyps5_dir = Some(PathBuf::from(v.trim()));
-                }
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let v = v.trim();
+            if v.is_empty() {
+                continue;
+            }
+            match k.trim() {
+                "anyps5_dir" => s.anyps5_dir = Some(PathBuf::from(v)),
+                "relinker" => s.relinker = Some(PathBuf::from(v)),
+                _ => {}
             }
         }
         s
@@ -87,11 +100,26 @@ impl Settings {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let mut text = String::from("# PKG Master settings\n");
+        let mut text = String::from("# PKG Master settings
+");
         if let Some(d) = &self.anyps5_dir {
-            text.push_str(&format!("anyps5_dir={}\n", d.display()));
+            text.push_str(&format!("anyps5_dir={}
+", d.display()));
+        }
+        if let Some(r) = &self.relinker {
+            text.push_str(&format!("relinker={}
+", r.display()));
         }
         Ok(fs::write(path, text)?)
+    }
+
+    /// The release these settings describe, if it is complete.
+    pub fn release(&self) -> Result<Release> {
+        let dir = self
+            .anyps5_dir
+            .as_deref()
+            .ok_or_else(|| Error::Conversion("the AnyPS5 folder is not set".into()))?;
+        find_release(dir, self.relinker.as_deref())
     }
 }
 
@@ -105,35 +133,79 @@ pub struct Release {
     pub libs: PathBuf,
 }
 
-/// Check that `dir` is an AnyPS5 release: the relinker plus `libs/*.prx`.
-pub fn find_release(dir: &Path) -> Result<Release> {
-    let relinker = dir.join(RELINKER);
-    if !relinker.is_file() {
-        return Err(Error::Conversion(format!(
-            "{} has no {RELINKER}; pick the AnyPS5 folder that holds {RELINKER} and libs/",
-            dir.display()
-        )));
-    }
-    // A build tree nests them one level deeper (build/core/libs/libs).
+/// The `libs/` folder of an AnyPS5 release (or of a build tree, which nests
+/// it one level deeper: build/core/libs/libs).
+pub fn find_libs(dir: &Path) -> Result<PathBuf> {
     for libs in [dir.join(LIBS_DIR), dir.join(LIBS_DIR).join(LIBS_DIR)] {
-        if !prx_files(&libs).is_empty() {
-            return Ok(Release { relinker, libs });
+        if !files_with_ext(&libs, &["prx"]).is_empty() {
+            return Ok(libs);
         }
     }
-    Err(Error::Conversion(format!("{} has no libs/ folder with .prx files", dir.display())))
+    Err(Error::Conversion(format!(
+        "{} has no libs/ folder with .prx files; pick the folder unpacked from AnyPS5's prx-windows archive",
+        dir.display()
+    )))
+}
+
+/// A relinker inside `dir`: `relinker.exe`, or the newest-named
+/// `relinker*.exe` such as `relinker-v0.1.2.exe`.
+pub fn find_relinker(dir: &Path) -> Option<PathBuf> {
+    let exact = dir.join(format!("{RELINKER_PREFIX}{RELINKER_EXT}"));
+    if exact.is_file() {
+        return Some(exact);
+    }
+    let mut found: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.path())
+        .filter(|p| is_relinker_name(p))
+        .collect();
+    found.sort();
+    found.pop()
+}
+
+fn is_relinker_name(p: &Path) -> bool {
+    let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+    if !name.starts_with(RELINKER_PREFIX) {
+        return false;
+    }
+    if RELINKER_EXT.is_empty() {
+        !name.contains('.') || name.rsplit_once('.').is_some_and(|(_, e)| e.chars().all(|c| c.is_ascii_digit()))
+    } else {
+        name.ends_with(RELINKER_EXT)
+    }
+}
+
+/// Check an AnyPS5 release: `libs/` in `dir`, and the relinker given (if it
+/// exists) or one found inside `dir`.
+pub fn find_release(dir: &Path, relinker: Option<&Path>) -> Result<Release> {
+    let libs = find_libs(dir)?;
+    let relinker = relinker
+        .filter(|r| r.is_file())
+        .map(Path::to_path_buf)
+        .or_else(|| find_relinker(dir))
+        .ok_or_else(|| {
+            Error::Conversion(format!(
+                "no relinker was found in {}; pick the relinker (relinker-v….exe from AnyPS5's releases)                  or put it in that folder",
+                dir.display()
+            ))
+        })?;
+    Ok(Release { relinker, libs })
 }
 
 fn has_module_ext(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, e)| MODULE_EXTS.contains(&e.to_lowercase().as_str()))
 }
 
-fn prx_files(dir: &Path) -> Vec<PathBuf> {
+/// Files directly in `dir` with one of `exts` (no dot, any case), sorted.
+fn files_with_ext(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
     let mut out: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("prx")))
+        .filter(|p| p.extension().is_some_and(|e| exts.iter().any(|x| e.eq_ignore_ascii_case(x))))
         .collect();
     out.sort();
     out
@@ -235,7 +307,7 @@ pub fn preflight(root: &Path) -> Result<Preflight> {
     if ps4.is_none() {
         let mut candidates: Vec<(String, PathBuf)> =
             EBOOTS.iter().map(|e| (e.to_string(), root.join(e))).collect();
-        for f in prx_files(&root.join(MODULE_DIR)) {
+        for f in files_with_ext(&root.join(MODULE_DIR), &["prx"]) {
             let name = f.file_name().unwrap_or_default().to_string_lossy().into_owned();
             candidates.push((format!("{MODULE_DIR}/{name}"), f));
         }
@@ -413,11 +485,11 @@ pub fn run_relinker(
 
     let libs_out = out_dir.join(LIBS_DIR);
     fs::create_dir_all(&libs_out)?;
-    let libs = prx_files(&release.libs);
+    let libs = files_with_ext(&release.libs, &LIB_EXTS);
     for lib in &libs {
         fs::copy(lib, libs_out.join(lib.file_name().unwrap_or_default()))?;
     }
-    log(&format!("Copied {} AnyPS5 librar{} into {LIBS_DIR}/", libs.len(), if libs.len() == 1 { "y" } else { "ies" }));
+    log(&format!("Copied {} file(s) from AnyPS5's libs into {LIBS_DIR}/", libs.len()));
 
     let app = out_dir.join(APP_EXE);
     let _ = fs::remove_file(&app);
@@ -457,7 +529,9 @@ pub fn stream_lines(r: impl Read, log: Log) {
             Ok(0) | Err(_) => break,
             Ok(_) => {
                 let text = String::from_utf8_lossy(&line);
-                log(text.trim_end_matches(['\r', '\n']));
+                let text = text.trim_end_matches(['\r', '\n']);
+                // A progress bar redrawn with \r is logged in its final state.
+                log(text.rsplit('\r').next().unwrap_or(text));
             }
         }
     }

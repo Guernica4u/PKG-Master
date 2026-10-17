@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
 use pkgmaster::anyps5::{
-    find_release, launch_command, preflight, run_relinker, settings_path, spawn_piped, stream_lines, Settings, APP_EXE,
+    find_libs, find_relinker, launch_command, preflight, run_relinker, settings_path, spawn_piped, stream_lines, Settings, APP_EXE,
 };
 use pkgmaster::binary::fmt_size;
 use pkgmaster::convert::{
@@ -243,19 +243,38 @@ impl App {
         });
     }
 
-    /// Ask for the AnyPS5 release folder, check it and remember it.
+    /// Ask for the AnyPS5 release folder (the one holding libs/) and, if no
+    /// relinker is inside it, for the relinker; check and remember both.
     fn pick_anyps5(&mut self) -> bool {
-        let mut dialog =
-            rfd::FileDialog::new().set_title("Pick your AnyPS5 folder (the one holding relinker.exe and libs)");
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Pick your AnyPS5 folder (the one holding libs/, unpacked from prx-windows)");
         if let Some(d) = &self.settings.anyps5_dir {
             dialog = dialog.set_directory(d);
         }
         let Some(dir) = dialog.pick_folder() else { return false };
-        if let Err(e) = find_release(&dir) {
+        if let Err(e) = find_libs(&dir) {
             self.status = Status::Err(describe_error(&e));
             return false;
         }
+        let relinker = if find_relinker(&dir).is_some() {
+            None
+        } else {
+            let mut dialog = rfd::FileDialog::new()
+                .set_title("Pick the AnyPS5 relinker (relinker-v….exe from AnyPS5's releases)")
+                .add_filter("Program", &["exe"])
+                .add_filter("All files", &["*"]);
+            let start = self.settings.relinker.as_ref().and_then(|r| r.parent()).or(dir.parent());
+            if let Some(d) = start {
+                dialog = dialog.set_directory(d);
+            }
+            let Some(file) = dialog.pick_file() else {
+                self.status = Status::Err("No relinker picked; the AnyPS5 folder was not changed.".into());
+                return false;
+            };
+            Some(file)
+        };
         self.settings.anyps5_dir = Some(dir);
+        self.settings.relinker = relinker;
         self.status = match self.settings.save(&settings_path()) {
             Ok(()) => Status::Ok("AnyPS5 folder saved.".into()),
             Err(e) => Status::Err(format!("AnyPS5 folder set, but it could not be saved: {}", describe_error(&e))),
@@ -265,8 +284,7 @@ impl App {
 
     fn run_anyps5(&mut self) {
         let Some(Input::Folder(root)) = self.loaded.as_ref().and_then(|l| l.input.clone()) else { return };
-        let have_release = self.settings.anyps5_dir.as_deref().is_some_and(|d| find_release(d).is_ok());
-        if !have_release && !self.pick_anyps5() {
+        if self.settings.release().is_err() && !self.pick_anyps5() {
             return;
         }
         let pre = match preflight(&root) {
@@ -286,7 +304,13 @@ impl App {
     }
 
     fn start_run(&mut self, ctx: &egui::Context, root: PathBuf, out: PathBuf) {
-        let Some(release) = self.settings.anyps5_dir.as_deref().and_then(|d| find_release(d).ok()) else { return };
+        let release = match self.settings.release() {
+            Ok(r) => r,
+            Err(e) => {
+                self.status = Status::Err(describe_error(&e));
+                return;
+            }
+        };
         self.log.clear();
         self.run_dir = None;
         self.busy = true;
@@ -639,9 +663,13 @@ impl eframe::App for App {
                     do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
                 }
                 do_pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("AnyPS5 folder…")).clicked();
-                match &self.settings.anyps5_dir {
-                    Some(d) => ui.label(RichText::new(d.display().to_string()).monospace().weak()),
-                    None => ui.weak("AnyPS5 folder not set"),
+                match self.settings.release() {
+                    Ok(r) => ui
+                        .label(RichText::new(r.libs.parent().unwrap_or(&r.libs).display().to_string()).monospace().weak())
+                        .on_hover_text(format!("relinker: {}
+libs: {}", r.relinker.display(), r.libs.display())),
+                    Err(_) if self.settings.anyps5_dir.is_some() => ui.weak("AnyPS5 folder incomplete, pick it again"),
+                    Err(_) => ui.weak("AnyPS5 folder not set"),
                 };
             });
 

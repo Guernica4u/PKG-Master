@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use common::{build_elf, build_self, scratch, write};
 use pkgmaster::anyps5::{
-    find_release, launch_command, preflight, prepare_source, relinker_args, run_logged, run_relinker, sfo_string,
+    find_libs, find_release, find_relinker, launch_command, preflight, prepare_source, relinker_args, run_logged, run_relinker, sfo_string,
     Settings,
 };
 use pkgmaster::elf::to_elf;
@@ -177,7 +177,10 @@ fn settings_round_trip() {
     let tmp = scratch("settings");
     let path = tmp.join("deep/settings.ini");
     assert_eq!(Settings::load(&path), Settings::default());
-    let s = Settings { anyps5_dir: Some(PathBuf::from(r"C:\Tools\AnyPS5 release")) };
+    let s = Settings {
+        anyps5_dir: Some(PathBuf::from(r"C:\Tools\prx-windows-v0.1.2")),
+        relinker: Some(PathBuf::from(r"C:\Users\me\Downloads\relinker-v0.1.2.exe")),
+    };
     s.save(&path).unwrap();
     assert_eq!(Settings::load(&path), s);
     let _ = fs::remove_dir_all(&tmp);
@@ -191,30 +194,63 @@ fn mock_relinker() -> PathBuf {
     exe
 }
 
-/// An AnyPS5 release folder holding the mock relinker and two libraries.
-fn mock_release(dir: &Path) {
-    let name = if cfg!(windows) { "relinker.exe" } else { "relinker" };
-    write(&dir.join(name), &fs::read(mock_relinker()).unwrap());
+const RELINKER_NAME: &str = if cfg!(windows) { "relinker-v0.1.2.exe" } else { "relinker-v0.1.2" };
+
+/// Copy the mock relinker to `path`.
+fn put_relinker(path: &Path) {
+    write(path, &fs::read(mock_relinker()).unwrap());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
+}
+
+/// AnyPS5's libraries archive as released (prx-windows-v0.1.2): libs/ with
+/// .prx files and the MinGW runtime DLLs, and no relinker.
+fn mock_libs(dir: &Path) {
+    write(&dir.join("USAGE.md"), b"# Relinker usage");
     write(&dir.join("libs/libkernel.prx"), b"anyps5 kernel");
     write(&dir.join("libs/libSceLibcInternal.prx"), b"anyps5 libc");
+    write(&dir.join("libs/libgcc_s_seh-1.dll"), b"mingw runtime");
     write(&dir.join("libs/README.txt"), b"not a library");
+}
+
+/// The libraries archive with the versioned relinker dropped into it.
+fn mock_release(dir: &Path) {
+    mock_libs(dir);
+    put_relinker(&dir.join(RELINKER_NAME));
 }
 
 #[test]
 fn find_release_checks_the_folder() {
     let tmp = scratch("release");
-    assert!(find_release(&tmp).is_err());
+    assert!(find_release(&tmp, None).is_err());
+
+    // The versioned relinker inside the libraries folder.
     mock_release(&tmp.join("ok"));
-    let r = find_release(&tmp.join("ok")).unwrap();
+    let r = find_release(&tmp.join("ok"), None).unwrap();
     assert_eq!(r.libs, tmp.join("ok/libs"));
-    fs::create_dir_all(tmp.join("nolibs")).unwrap();
-    fs::copy(mock_relinker(), tmp.join("nolibs").join(if cfg!(windows) { "relinker.exe" } else { "relinker" })).unwrap();
-    assert!(find_release(&tmp.join("nolibs")).unwrap_err().to_string().contains("libs"));
+    assert_eq!(r.relinker, tmp.join("ok").join(RELINKER_NAME));
+
+    // The libraries archive alone has no relinker; it can be given separately,
+    // as when relinker-v0.1.2.exe sits in Downloads next to the unpacked folder.
+    mock_libs(&tmp.join("prx-windows"));
+    assert!(find_libs(&tmp.join("prx-windows")).is_ok());
+    assert_eq!(find_relinker(&tmp.join("prx-windows")), None);
+    let err = find_release(&tmp.join("prx-windows"), None).unwrap_err().to_string();
+    assert!(err.contains("relinker"), "{err}");
+    put_relinker(&tmp.join(RELINKER_NAME));
+    let r = find_release(&tmp.join("prx-windows"), Some(&tmp.join(RELINKER_NAME))).unwrap();
+    assert_eq!(r.relinker, tmp.join(RELINKER_NAME));
+    // A remembered relinker that has since been deleted is not used.
+    assert!(find_release(&tmp.join("prx-windows"), Some(&tmp.join("gone.exe"))).is_err());
+    let s = Settings { anyps5_dir: Some(tmp.join("prx-windows")), relinker: Some(tmp.join(RELINKER_NAME)) };
+    assert_eq!(s.release().unwrap().relinker, tmp.join(RELINKER_NAME));
+
+    // A relinker with no libs/ is not enough.
+    put_relinker(&tmp.join("nolibs").join(RELINKER_NAME));
+    assert!(find_release(&tmp.join("nolibs"), None).unwrap_err().to_string().contains("libs"));
     let _ = fs::remove_dir_all(&tmp);
 }
 
@@ -226,7 +262,7 @@ fn run_with_mock_relinker() {
     write(&game.join("eboot.bin"), &build_self(&build_elf(&[b"original eboot"], false), false));
     let before = snapshot(&game);
     mock_release(&tmp.join("AnyPS5"));
-    let release = find_release(&tmp.join("AnyPS5")).unwrap();
+    let release = find_release(&tmp.join("AnyPS5"), None).unwrap();
 
     let lines = Mutex::new(Vec::<String>::new());
     let log = |l: &str| lines.lock().unwrap().push(l.to_string());
@@ -251,10 +287,13 @@ fn run_with_mock_relinker() {
     let log_text = lines.lock().unwrap().join("\n");
     assert!(log_text.contains("mock relinker: --windows"), "{log_text}");
     assert!(log_text.contains("mock relinker stderr line"), "{log_text}");
+    assert!(lines.lock().unwrap().iter().any(|l| l == "Instruction scan | eboot.elf | 100%"), "{log_text}");
+    assert!(!log_text.contains("57%"), "{log_text}");
 
     // Runtime layout from AnyPS5's USAGE.md.
     assert!(out.join("app.exe").is_file());
-    assert_eq!(r.libs, 2);
+    assert_eq!(r.libs, 3);
+    assert_eq!(fs::read(out.join("libs/libgcc_s_seh-1.dll")).unwrap(), b"mingw runtime");
     assert_eq!(fs::read(out.join("libs/libkernel.prx")).unwrap(), b"anyps5 kernel");
     assert!(out.join("libs/libSceLibcInternal.prx").is_file());
     assert!(!out.join("libs/README.txt").exists());
@@ -291,7 +330,7 @@ fn relinker_failure_is_reported() {
     ps4_unity_game(&game);
     write(&game.join("mock-fail"), b"");
     mock_release(&tmp.join("AnyPS5"));
-    let release = find_release(&tmp.join("AnyPS5")).unwrap();
+    let release = find_release(&tmp.join("AnyPS5"), None).unwrap();
     let lines = Mutex::new(Vec::<String>::new());
     let err = run_relinker(&game, &release, &tmp.join("run"), &|_, _, _| {}, &|l: &str| {
         lines.lock().unwrap().push(l.to_string())

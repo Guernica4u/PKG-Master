@@ -18,12 +18,15 @@ legally yourself:
   encrypted segments) is listed and left out; no broken file is written.
   AnyPS5 itself isn't included.
 - **Run in AnyPS5…** runs your own copy of AnyPS5 on an opened game folder.
-  Point the app once at your AnyPS5 release folder (**AnyPS5 folder…**, the
-  one holding `relinker.exe` and `libs/`); the choice is saved in
-  `%APPDATA%\PKG Master\settings.ini`. It then converts `eboot` and every
-  module in `sce_module/` (plus Unity's `Media/Modules` and `Media/Plugins`)
-  to ELF under `source/`, copies the game into `app0/` and AnyPS5's
-  `libs/*.prx` into `libs/`, and runs
+  AnyPS5's releases ship the libraries (`prx-windows-v….zip`) and the
+  relinker (`relinker-v….exe`) separately. Point the app once at the
+  unpacked libraries folder (**AnyPS5 folder…**, the one holding `libs/`); if
+  no `relinker*.exe` is inside it, the app asks for the relinker file too.
+  Both are saved in `%APPDATA%\PKG Master\settings.ini`. It then converts
+  `eboot` and every module in `sce_module/` (plus Unity's `Media/Modules` and
+  `Media/Plugins`) to ELF under `source/`, copies the game into `app0/` and
+  AnyPS5's `libs/` (the `.prx` files and the MinGW runtime `.dll`s they need)
+  into `libs/`, and runs
   `relinker --windows [--module-dir Media/Modules --module-dir Media/Plugins] source/eboot.elf app.exe`
   in the folder you pick, showing its output in a log panel. **Launch** then
   starts `app.exe` from that folder. PS4 titles (a `CUSA` title ID or PS4

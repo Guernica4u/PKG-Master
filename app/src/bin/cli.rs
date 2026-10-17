@@ -6,7 +6,7 @@
 //!   pkgmaster-cli convert FILE OUT [--passcode P] [--path P]
 //!   pkgmaster-cli extract FILE DIR [--passcode P]
 //!   pkgmaster-cli export  FILE|FOLDER DIR [--passcode P]
-//!   pkgmaster-cli anyps5  FOLDER DIR [--anyps5 ANYPS5_DIR]
+//!   pkgmaster-cli anyps5  FOLDER DIR [--anyps5 ANYPS5_DIR] [--relinker FILE]
 //!
 //! `export` lays a package or a decrypted game folder out for AnyPS5:
 //! source/eboot.elf, source/sce_module/*, app0/ and HOW-TO-RUN.txt. `anyps5`
@@ -19,12 +19,12 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use pkgmaster::anyps5::{find_release, preflight, run_relinker, settings_path, Settings};
+use pkgmaster::anyps5::{preflight, run_relinker, settings_path, Settings};
 use pkgmaster::convert::{convert_to_elf, export_anyps5, extract_all, load, Input, MODULE_DIR};
 use pkgmaster::Error;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: pkgmaster-cli info|list|convert|extract|export|anyps5 FILE [OUT] [--passcode P] [--path P] [--anyps5 DIR]");
+    eprintln!("usage: pkgmaster-cli info|list|convert|extract|export|anyps5 FILE [OUT] [--passcode P] [--path P] [--anyps5 DIR] [--relinker FILE]");
     ExitCode::from(2)
 }
 
@@ -39,6 +39,7 @@ fn main() -> ExitCode {
     let passcode = take_opt("--passcode").or_else(|| std::env::var("PKGMASTER_PASSCODE").ok());
     let inner = take_opt("--path");
     let anyps5_dir = take_opt("--anyps5");
+    let relinker = take_opt("--relinker");
     if args.len() < 2 {
         return usage();
     }
@@ -108,11 +109,17 @@ fn main() -> ExitCode {
                 let Input::Folder(root) = &input else {
                     return Err(Error::Conversion("anyps5 needs a decrypted game folder".into()));
                 };
-                let dir = anyps5_dir
-                    .map(Into::into)
-                    .or_else(|| Settings::load(&settings_path()).anyps5_dir)
-                    .ok_or_else(|| Error::Conversion("pass --anyps5 with your AnyPS5 folder".into()))?;
-                let release = find_release(&dir)?;
+                let mut settings = Settings::load(&settings_path());
+                if let Some(d) = anyps5_dir {
+                    settings = Settings { anyps5_dir: Some(d.into()), relinker: None };
+                }
+                if let Some(r) = relinker {
+                    settings.relinker = Some(r.into());
+                }
+                if settings.anyps5_dir.is_none() {
+                    return Err(Error::Conversion("pass --anyps5 with your AnyPS5 folder".into()));
+                }
+                let release = settings.release()?;
                 for w in preflight(root)?.warnings() {
                     println!("warning: {w}");
                 }
