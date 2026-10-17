@@ -56,10 +56,12 @@ starting. AnyPS5 is early software and only a few games work so far.
 
 ### shadPKG
 
-The **Run shadPKG (PS4)…** button runs a `shadpkg.exe` that you provide. Put
-it next to `pkgmaster-gui.exe` (or in a `shad\` folder beside it), or the app
-asks where it is. shadPKG isn't part of PKG Master and isn't included in the
-download.
+The **Run shadPKG (PS4)…** button runs [shadPKG](https://github.com/seregonwar/ShadPKG),
+which isn't part of PKG Master and isn't included in the download.
+Download `shadPKG.exe` from its
+[official releases](https://github.com/seregonwar/ShadPKG/releases) and drop
+it in the empty **`shadpkg`** folder next to `pkgmaster-gui.exe`. If it's
+missing, the button tells you this and links to the download.
 
 ## What it won't do
 
