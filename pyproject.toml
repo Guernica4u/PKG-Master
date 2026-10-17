@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pkgmaster"
+version = "0.1.0"
+description = "Inspect PS4/PS5 PKG files and convert their contents to standard formats"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["cryptography>=41"]
+keywords = ["ps4", "ps5", "pkg", "pfs", "elf", "self", "fpkg"]
+
+[project.scripts]
+pkgmaster = "pkgmaster.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["pkgmaster*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
