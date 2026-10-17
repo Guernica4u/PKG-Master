@@ -102,6 +102,10 @@ struct App {
     /// Reload what is open once the running job finishes (after a delete).
     refresh_after_job: bool,
     pending_refresh: bool,
+    /// The open game's icon, uploaded to the GPU once per load.
+    icon_tex: Option<egui::TextureHandle>,
+    /// The game title currently shown in the window's title bar.
+    shown_title: Option<String>,
 }
 
 /// Something picked from a file's right-click menu.
@@ -149,6 +153,8 @@ impl App {
             delete_confirm: None,
             refresh_after_job: false,
             pending_refresh: false,
+            icon_tex: None,
+            shown_title: None,
         }
     }
 
@@ -185,6 +191,7 @@ impl App {
                 file_label(&path)
             ));
             self.loaded = None;
+            self.icon_tex = None;
             self.selected = None;
             self.path = Some(path);
             self.browse = Some(rows);
@@ -193,6 +200,7 @@ impl App {
         self.browse = None;
         self.busy = true;
         self.loaded = None;
+        self.icon_tex = None;
         self.selected = None;
         self.progress = None;
         self.status = Status::Info(format!("Opening {}…", file_label(&path)));
@@ -510,6 +518,7 @@ impl App {
                             };
                             self.selected = l.default_elf.clone();
                             self.loaded = Some(l);
+                            self.icon_tex = None;
                         }
                         Err(e) => self.status = Status::Err(describe_error(&e)),
                     }
@@ -564,6 +573,26 @@ impl App {
         }
         if let Some(path) = dialog.pick_file() {
             self.start_load(ctx, path);
+        }
+    }
+
+    /// Upload the open game's icon and put its title in the title bar.
+    fn update_game_header(&mut self, ctx: &egui::Context) {
+        let info = self.loaded.as_ref().map(|l| &l.info);
+        if self.icon_tex.is_none() {
+            if let Some(icon) = info.and_then(|i| i.icon.as_ref()) {
+                let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+                self.icon_tex = Some(ctx.load_texture("game-icon", image, egui::TextureOptions::LINEAR));
+            }
+        }
+        let title = info.and_then(|i| i.title.clone());
+        if title != self.shown_title {
+            let text = match &title {
+                Some(t) => format!("PKG Master - {t}"),
+                None => "PKG Master".to_string(),
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(text));
+            self.shown_title = title;
         }
     }
 
@@ -972,6 +1001,7 @@ fn describe_error(e: &Error) -> String {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_messages();
+        self.update_game_header(ctx);
         if std::mem::take(&mut self.pending_refresh) {
             if let Some(p) = self.path.clone() {
                 self.open(ctx, p, false);
@@ -1176,6 +1206,31 @@ impl eframe::App for App {
                 });
                 return;
             };
+
+            // Icon, title, title ID and version, when the game has them.
+            if !loaded.info.is_empty() {
+                ui.horizontal(|ui| {
+                    if let Some(tex) = &self.icon_tex {
+                        ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(88.0, 88.0)));
+                    }
+                    ui.vertical(|ui| {
+                        ui.add_space(8.0);
+                        let title = loaded.info.title.as_deref().unwrap_or("Untitled game");
+                        ui.label(RichText::new(title).size(22.0).strong());
+                        let mut sub = Vec::new();
+                        if let Some(id) = &loaded.info.title_id {
+                            sub.push(id.clone());
+                        }
+                        if let Some(v) = &loaded.info.version {
+                            sub.push(format!("version {v}"));
+                        }
+                        if !sub.is_empty() {
+                            ui.weak(sub.join("  ·  "));
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+            }
 
             egui::Grid::new("info").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
                 for (k, v) in &loaded.rows {
