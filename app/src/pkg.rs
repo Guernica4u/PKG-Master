@@ -209,6 +209,8 @@ impl Kind {
 
 pub struct Pkg {
     reader: SharedSource,
+    /// The CNT container (the whole file on PS4, a window into it on PS5).
+    cnt: SharedSource,
     pub kind: Kind,
     pub container: Container,
     pub fih: Option<FihHeader>,
@@ -223,22 +225,35 @@ impl Pkg {
         let magic = reader.read_at(0, 4)?;
         if magic == CNT_MAGIC {
             let container = Container::parse(reader.as_ref())?;
-            return Ok(Pkg { reader, kind: Kind::Ps4, container, fih: None });
+            return Ok(Pkg { cnt: reader.clone(), reader, kind: Kind::Ps4, container, fih: None });
         }
         if magic == FIH_MAGIC {
             let fih = FihHeader::parse(&reader.read_at(0, 0x100.min(reader.len() as usize))?)?;
             if fih.cnt_size == 0 || fih.cnt_offset.saturating_add(fih.cnt_size) > reader.len() {
                 return Err(Error::Corrupt("PS5 image has no usable embedded metadata container".into()));
             }
-            let cnt = Window::new(reader.clone(), fih.cnt_offset, fih.cnt_size, "ps5-cnt")?;
-            let container = Container::parse(&cnt)?;
-            return Ok(Pkg { reader, kind: Kind::Ps5, container, fih: Some(fih) });
+            let cnt: SharedSource = Arc::new(Window::new(reader.clone(), fih.cnt_offset, fih.cnt_size, "ps5-cnt")?);
+            let container = Container::parse(cnt.as_ref())?;
+            return Ok(Pkg { reader, cnt, kind: Kind::Ps5, container, fih: Some(fih) });
         }
         Err(Error::NotAPackage(format!(
             "{}: magic {:02X?} is neither PS4 \\x7FCNT nor PS5 \\x7FFIH",
             path.display(),
             magic
         )))
+    }
+
+    /// The payload of an unencrypted metadata entry (e.g. 0x1000 param.sfo),
+    /// or `None` if the entry is missing, encrypted or implausibly large.
+    pub fn entry_data(&self, id: u32) -> Result<Option<Vec<u8>>> {
+        let Some(e) = self.container.entries.iter().find(|e| e.id == id) else { return Ok(None) };
+        if e.encrypted() || e.data_size == 0 || e.data_size as u64 > crate::meta::MAX_META_SIZE {
+            return Ok(None);
+        }
+        if e.data_offset as u64 + e.data_size as u64 > self.cnt.len() {
+            return Err(Error::Corrupt(format!("entry 0x{:04X} runs past the container", e.id)));
+        }
+        Ok(Some(self.cnt.read_at(e.data_offset as u64, e.data_size as usize)?))
     }
 
     pub fn content_id(&self) -> &str {
