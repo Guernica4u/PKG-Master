@@ -147,8 +147,8 @@ pub fn find_libs(dir: &Path) -> Result<PathBuf> {
     )))
 }
 
-/// A relinker inside `dir`: `relinker.exe`, or the newest-named
-/// `relinker*.exe` such as `relinker-v0.1.2.exe`.
+/// A relinker inside `dir`: `relinker.exe`, or the newest-named `.exe` with
+/// "relinker" anywhere in its name, such as `relinker-v0.1.2.exe`.
 pub fn find_relinker(dir: &Path) -> Option<PathBuf> {
     let exact = dir.join(format!("{RELINKER_PREFIX}{RELINKER_EXT}"));
     if exact.is_file() {
@@ -167,7 +167,9 @@ pub fn find_relinker(dir: &Path) -> Option<PathBuf> {
 
 fn is_relinker_name(p: &Path) -> bool {
     let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-    if !name.starts_with(RELINKER_PREFIX) {
+    // Any name containing "relinker" counts (relinker-v0.1.2.exe,
+    // AnyPS5-relinker.exe, ...), so nobody has to rename the download.
+    if !name.contains(RELINKER_PREFIX) {
         return false;
     }
     if RELINKER_EXT.is_empty() {

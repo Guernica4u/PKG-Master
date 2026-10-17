@@ -18,7 +18,7 @@ use pkgmaster::anyps5::{
 };
 use pkgmaster::binary::fmt_size;
 use pkgmaster::convert::{
-    convert_to_elf, default_output_name, export_anyps5, extract_all, load, Input, Loaded, MODULE_DIR,
+    convert_to_elf, default_output_name, extract_all, load, Input, Loaded,
 };
 use pkgmaster::Error;
 
@@ -88,6 +88,8 @@ struct App {
     log: Vec<String>,
     /// The launched game, while it runs.
     game: Arc<Mutex<Option<Child>>>,
+    /// Several .pkg files found in an opened folder; the user picks one.
+    pkg_choices: Option<Vec<PathBuf>>,
 }
 
 impl App {
@@ -108,6 +110,7 @@ impl App {
             run_dir: None,
             log: Vec::new(),
             game: Arc::new(Mutex::new(None)),
+            pkg_choices: None,
         }
     }
 
@@ -117,6 +120,22 @@ impl App {
     }
 
     fn start_load(&mut self, ctx: &egui::Context, path: PathBuf) {
+        // A folder with no eboot but with .pkg files in it: open the package
+        // instead of failing (or ask which one when there are several).
+        let mut path = path;
+        let pkgs = pkgs_in_folder(&path);
+        match pkgs.len() {
+            0 => {}
+            1 => path = pkgs.into_iter().next().unwrap(),
+            _ => {
+                self.status = Status::Info(format!("{} has several .pkg files; pick one.", file_label(&path)));
+                self.loaded = None;
+                self.path = Some(path);
+                self.pkg_choices = Some(pkgs);
+                return;
+            }
+        }
+        self.pkg_choices = None;
         self.busy = true;
         self.loaded = None;
         self.selected = None;
@@ -206,43 +225,6 @@ impl App {
         });
     }
 
-    fn export(&mut self, ctx: &egui::Context) {
-        let Some(input) = self.loaded.as_ref().and_then(|l| l.input.clone()) else { return };
-        if matches!(input, Input::Binary(_)) {
-            return;
-        }
-        let mut dialog = rfd::FileDialog::new().set_title("Export for AnyPS5 into");
-        if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
-            dialog = dialog.set_directory(dir);
-        }
-        let Some(dir) = dialog.pick_folder() else { return };
-        let name = self
-            .path
-            .as_ref()
-            .and_then(|p| if p.is_dir() { p.file_name() } else { p.file_stem() })
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "game".into());
-        let out = dir.join(format!("{name}-anyps5"));
-        self.status = Status::Info("Exporting for AnyPS5…".into());
-        self.spawn_job(ctx, move |progress| {
-            let r = export_anyps5(&input, &out, progress)?;
-            let mut msg = format!(
-                "Exported to {}: eboot.elf, {} module(s), {} original file(s). See HOW-TO-RUN.txt.",
-                out.display(),
-                r.modules.len(),
-                r.app0_files
-            );
-            for (name, why) in &r.skipped {
-                msg.push_str(&format!("\nSkipped {MODULE_DIR}/{name}: {why}"));
-            }
-            for w in &r.warnings {
-                msg.push_str("\nNote: ");
-                msg.push_str(w);
-            }
-            Ok(msg)
-        });
-    }
-
     /// Ask for the AnyPS5 release folder (the one holding libs/) and, if no
     /// relinker is inside it, for the relinker; check and remember both.
     fn pick_anyps5(&mut self) -> bool {
@@ -294,13 +276,10 @@ impl App {
                 return;
             }
         };
-        let mut dialog = rfd::FileDialog::new().set_title("Lay out the AnyPS5 run folder inside");
-        if let Some(dir) = root.parent() {
-            dialog = dialog.set_directory(dir);
-        }
-        let Some(dir) = dialog.pick_folder() else { return };
+        // The run folder goes straight into the AnyPS5 folder; no picker.
+        let Some(anyps5_dir) = self.settings.anyps5_dir.clone() else { return };
         let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "game".into());
-        self.confirm = Some((pre.warnings(), root, dir.join(format!("{name}-anyps5-run"))));
+        self.confirm = Some((pre.warnings(), root, anyps5_dir.join(format!("{name}-run"))));
     }
 
     fn start_run(&mut self, ctx: &egui::Context, root: PathBuf, out: PathBuf) {
@@ -510,6 +489,24 @@ impl App {
     }
 }
 
+/// The `.pkg` files directly inside `dir`, when `dir` is a folder without an
+/// eboot (so it is not a decrypted game folder). Empty otherwise.
+fn pkgs_in_folder(dir: &Path) -> Vec<PathBuf> {
+    if !dir.is_dir() || ["eboot.bin", "eboot.elf"].iter().any(|e| dir.join(e).is_file()) {
+        return Vec::new();
+    }
+    let mut pkgs: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pkg")))
+                .collect()
+        })
+        .unwrap_or_default();
+    pkgs.sort();
+    pkgs
+}
+
 fn file_label(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
 }
@@ -696,6 +693,13 @@ impl eframe::App for App {
                 if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Open folder…").size(16.0))).clicked() {
                     self.pick_folder(ctx);
                 }
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new(RichText::new("Run shadPKG (PS4)…").size(16.0)))
+                    .on_hover_text("Run on PS4 pkg files")
+                    .clicked()
+                {
+                    self.run_shadpkg(ctx);
+                }
                 match &self.path {
                     Some(p) => ui.label(RichText::new(p.display().to_string()).monospace()),
                     None => ui.weak("No file open"),
@@ -705,38 +709,42 @@ impl eframe::App for App {
                 }
             });
 
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Passcode:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.passcode)
-                        .password(true)
-                        .hint_text("only for encrypted packages")
-                        .desired_width(300.0),
-                );
-                let can_unlock = !self.busy && self.path.is_some();
-                if ui.add_enabled(can_unlock, egui::Button::new("Unlock")).clicked() {
-                    if let Some(p) = self.path.clone() {
+            // The passcode row only appears for an encrypted package.
+            if self.loaded.as_ref().is_some_and(|l| l.key_problem.is_some()) {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Passcode:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.passcode)
+                            .password(true)
+                            .hint_text("32 characters, often all zeros")
+                            .desired_width(300.0),
+                    );
+                    let can_unlock = !self.busy && self.path.is_some();
+                    if ui.add_enabled(can_unlock, egui::Button::new("Unlock")).clicked() {
+                        if let Some(p) = self.path.clone() {
+                            self.start_load(ctx, p);
+                        }
+                    }
+                });
+            }
+            ui.separator();
+
+            if let Some(choices) = self.pkg_choices.clone() {
+                ui.label("This folder has several .pkg files. Which one?");
+                for p in choices {
+                    if ui.add_enabled(!self.busy, egui::Button::new(file_label(&p))).clicked() {
                         self.start_load(ctx, p);
                     }
                 }
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new("Run shadPKG…"))
-                    .on_hover_text("Extract a .pkg with shadpkg.exe (uses the open package, or asks for one)")
-                    .clicked()
-                {
-                    self.run_shadpkg(ctx);
-                }
-            });
-            ui.separator();
+                return;
+            }
 
             let Some(loaded) = &self.loaded else {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
-                    ui.heading("Drop a .pkg file here");
-                    ui.weak("Fake-signed and debug PS4/PS5 packages, a SELF/ELF file,");
-                    ui.weak("or a decrypted game folder you dumped yourself (Open folder…).");
-                    ui.weak("Retail packages need console keys and can't be opened.");
+                    ui.heading("Drag a PKG (PS4) file here");
+                    ui.weak("or open a folder containing a decrypted PS5 game (Open folder…).");
                 });
                 return;
             };
@@ -755,7 +763,6 @@ impl eframe::App for App {
             let has_files = matches!(loaded.input, Some(Input::Package(_) | Input::Folder(_)));
             let mut do_convert = false;
             let mut do_extract = false;
-            let mut do_export = false;
             let mut do_run = false;
             let mut do_pick_anyps5 = false;
             let mut do_launch = false;
@@ -766,16 +773,13 @@ impl eframe::App for App {
                     (Some(p), true) => format!("Convert {} to ELF…", p.rsplit('/').next().unwrap_or(p)),
                     _ => "Convert to ELF…".to_string(),
                 };
-                do_convert = ui.add_enabled(ready, egui::Button::new(RichText::new(label).size(15.0))).clicked();
+                do_convert = ui
+                    .add_enabled(ready, egui::Button::new(RichText::new(label).size(15.0)))
+                    .on_hover_text("ELF is the file type AnyPS5 needs.")
+                    .clicked();
                 do_extract = ui
                     .add_enabled(ready && is_package, egui::Button::new(RichText::new("Extract all files…").size(15.0)))
-                    .clicked();
-                do_export = ui
-                    .add_enabled(ready && has_files, egui::Button::new(RichText::new("Export for AnyPS5…").size(15.0)))
-                    .on_hover_text(
-                        "Writes source/eboot.elf, source/sce_module/ (modules as ELF), app0/ (original files) \
-                         and HOW-TO-RUN.txt into a folder you pick.",
-                    )
+                    .on_hover_text("Unpacks everything inside the .pkg into a normal folder.")
                     .clicked();
             });
             ui.horizontal(|ui| {
@@ -787,7 +791,7 @@ impl eframe::App for App {
                     )
                     .on_hover_text(
                         "Converts the game's executables, runs your AnyPS5 relinker on them and lays out \
-                         app.exe, libs/ and app0/ in a folder you pick.",
+                         app.exe, libs/ and app0/ inside your AnyPS5 folder.",
                     )
                     .on_disabled_hover_text("Needs a decrypted game folder (Open folder…).")
                     .clicked();
@@ -796,15 +800,29 @@ impl eframe::App for App {
                 if running {
                     do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
                 }
-                do_pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("AnyPS5 folder…")).clicked();
-                match self.settings.release() {
-                    Ok(r) => ui
-                        .label(RichText::new(r.libs.parent().unwrap_or(&r.libs).display().to_string()).monospace().weak())
-                        .on_hover_text(format!("relinker: {}
-libs: {}", r.relinker.display(), r.libs.display())),
-                    Err(_) if self.settings.anyps5_dir.is_some() => ui.weak("AnyPS5 folder incomplete, pick it again"),
-                    Err(_) => ui.weak("AnyPS5 folder not set"),
-                };
+                match (self.settings.release(), &self.settings.anyps5_dir) {
+                    // Once set, the button is replaced by the path; click it to change.
+                    (Ok(r), Some(dir)) => {
+                        do_pick_anyps5 = ui
+                            .add_enabled(
+                                !self.busy,
+                                egui::Link::new(RichText::new(format!("AnyPS5: {}", dir.display())).monospace()),
+                            )
+                            .on_hover_text(format!(
+                                "Click to change.\nrelinker: {}\nlibs: {}",
+                                r.relinker.display(),
+                                r.libs.display()
+                            ))
+                            .clicked();
+                    }
+                    (Err(_), Some(_)) => {
+                        do_pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("AnyPS5 folder…")).clicked();
+                        ui.weak("AnyPS5 folder incomplete, pick it again");
+                    }
+                    _ => {
+                        do_pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("AnyPS5 folder…")).clicked();
+                    }
+                }
             });
 
             if has_files && !loaded.files.is_empty() {
@@ -838,9 +856,6 @@ libs: {}", r.relinker.display(), r.libs.display())),
             }
             if do_extract {
                 self.extract(ctx);
-            }
-            if do_export {
-                self.export(ctx);
             }
             if do_pick_anyps5 {
                 self.pick_anyps5();
