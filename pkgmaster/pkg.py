@@ -25,6 +25,7 @@ from .errors import (
     NotAPackage,
     TruncatedFile,
     UnsupportedFeature,
+    WrongKey,
 )
 
 CNT_MAGIC = b"\x7fCNT"
