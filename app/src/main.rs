@@ -1,5 +1,6 @@
 //! PKG Master: a small window for opening a PS4/PS5 package, converting its
-//! executable to ELF, or extracting all of its files.
+//! executable to ELF, extracting all of its files, or exporting a package or
+//! decrypted game folder for AnyPS5.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -9,7 +10,9 @@ use std::thread;
 
 use eframe::egui::{self, Color32, RichText};
 use pkgmaster::binary::fmt_size;
-use pkgmaster::convert::{convert_to_elf, default_output_name, extract_all, load, Input, Loaded};
+use pkgmaster::convert::{
+    convert_to_elf, default_output_name, export_anyps5, extract_all, load, Input, Loaded, MODULE_DIR,
+};
 use pkgmaster::Error;
 
 const PACKAGE_EXTS: [&str; 1] = ["pkg"];
@@ -121,7 +124,7 @@ impl App {
         let Some(input) = self.loaded.as_ref().and_then(|l| l.input.clone()) else { return };
         let inner = self.selected.clone();
         let source_name = match (&input, &inner, &self.path) {
-            (Input::Package(_), Some(p), _) => p.clone(),
+            (Input::Package(_) | Input::Folder(_), Some(p), _) => p.clone(),
             (_, _, Some(path)) => path.to_string_lossy().into_owned(),
             _ => "eboot.bin".into(),
         };
@@ -174,6 +177,43 @@ impl App {
         });
     }
 
+    fn export(&mut self, ctx: &egui::Context) {
+        let Some(input) = self.loaded.as_ref().and_then(|l| l.input.clone()) else { return };
+        if matches!(input, Input::Binary(_)) {
+            return;
+        }
+        let mut dialog = rfd::FileDialog::new().set_title("Export for AnyPS5 into");
+        if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(dir) = dialog.pick_folder() else { return };
+        let name = self
+            .path
+            .as_ref()
+            .and_then(|p| if p.is_dir() { p.file_name() } else { p.file_stem() })
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "game".into());
+        let out = dir.join(format!("{name}-anyps5"));
+        self.status = Status::Info("Exporting for AnyPS5…".into());
+        self.spawn_job(ctx, move |progress| {
+            let r = export_anyps5(&input, &out, progress)?;
+            let mut msg = format!(
+                "Exported to {}: eboot.elf, {} module(s), {} original file(s). See HOW-TO-RUN.txt.",
+                out.display(),
+                r.modules.len(),
+                r.app0_files
+            );
+            for (name, why) in &r.skipped {
+                msg.push_str(&format!("\nSkipped {MODULE_DIR}/{name}: {why}"));
+            }
+            for w in &r.warnings {
+                msg.push_str("\nNote: ");
+                msg.push_str(w);
+            }
+            Ok(msg)
+        });
+    }
+
     fn handle_messages(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
@@ -190,7 +230,7 @@ impl App {
                                 }
                                 Some(e) => Status::Err(format!("That passcode didn't work: {e}")),
                                 None => match &l.input {
-                                    Some(Input::Package(_)) => Status::Ok(format!(
+                                    Some(Input::Package(_) | Input::Folder(_)) => Status::Ok(format!(
                                         "Opened {}. Pick a file below or use the defaults.",
                                         file_label(&path)
                                     )),
@@ -226,6 +266,16 @@ impl App {
             dialog = dialog.set_directory(dir);
         }
         if let Some(path) = dialog.pick_file() {
+            self.start_load(ctx, path);
+        }
+    }
+
+    fn pick_folder(&mut self, ctx: &egui::Context) {
+        let mut dialog = rfd::FileDialog::new().set_title("Open a decrypted game folder (the one holding eboot.bin)");
+        if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.pick_folder() {
             self.start_load(ctx, path);
         }
     }
@@ -276,6 +326,9 @@ impl eframe::App for App {
                 if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Open file…").size(16.0))).clicked() {
                     self.pick_file(ctx);
                 }
+                if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Open folder…").size(16.0))).clicked() {
+                    self.pick_folder(ctx);
+                }
                 match &self.path {
                     Some(p) => ui.label(RichText::new(p.display().to_string()).monospace()),
                     None => ui.weak("No file open"),
@@ -307,7 +360,8 @@ impl eframe::App for App {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
                     ui.heading("Drop a .pkg file here");
-                    ui.weak("Fake-signed and debug PS4/PS5 packages, or a SELF/ELF file.");
+                    ui.weak("Fake-signed and debug PS4/PS5 packages, a SELF/ELF file,");
+                    ui.weak("or a decrypted game folder you dumped yourself (Open folder…).");
                     ui.weak("Retail packages need console keys and can't be opened.");
                 });
                 return;
@@ -324,10 +378,12 @@ impl eframe::App for App {
             ui.add_space(8.0);
             let ready = loaded.input.is_some() && !self.busy;
             let is_package = matches!(loaded.input, Some(Input::Package(_)));
+            let has_files = matches!(loaded.input, Some(Input::Package(_) | Input::Folder(_)));
             let mut do_convert = false;
             let mut do_extract = false;
+            let mut do_export = false;
             ui.horizontal(|ui| {
-                let label = match (&self.selected, is_package) {
+                let label = match (&self.selected, has_files) {
                     (Some(p), true) => format!("Convert {} to ELF…", p.rsplit('/').next().unwrap_or(p)),
                     _ => "Convert to ELF…".to_string(),
                 };
@@ -335,11 +391,22 @@ impl eframe::App for App {
                 do_extract = ui
                     .add_enabled(ready && is_package, egui::Button::new(RichText::new("Extract all files…").size(15.0)))
                     .clicked();
+                do_export = ui
+                    .add_enabled(ready && has_files, egui::Button::new(RichText::new("Export for AnyPS5…").size(15.0)))
+                    .on_hover_text(
+                        "Writes source/eboot.elf, source/sce_module/ (modules as ELF), app0/ (original files) \
+                         and HOW-TO-RUN.txt into a folder you pick.",
+                    )
+                    .clicked();
             });
 
-            if is_package && !loaded.files.is_empty() {
+            if has_files && !loaded.files.is_empty() {
                 ui.add_space(8.0);
-                ui.label("Files in the package (click one to choose what gets converted):");
+                ui.label(if is_package {
+                    "Files in the package (click one to choose what gets converted):"
+                } else {
+                    "Files in the folder (click one to choose what gets converted):"
+                });
                 let files: Vec<_> = loaded.files.iter().filter(|f| !f.is_dir).collect();
                 let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
                 let mut clicked = None;
@@ -364,6 +431,9 @@ impl eframe::App for App {
             }
             if do_extract {
                 self.extract(ctx);
+            }
+            if do_export {
+                self.export(ctx);
             }
         });
     }
