@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::binary::{fmt_size, Source};
 use crate::elf::{alignment_problems, is_elf, is_self, to_elf, Conversion};
 use crate::error::{Error, Result};
+use crate::meta::GameInfo;
 use crate::pfs::PfsImage;
 use crate::pkg::{content_type_name, Kind, Pkg, CNT_MAGIC, FIH_MAGIC};
 
@@ -126,6 +127,35 @@ pub struct Loaded {
     pub default_elf: Option<String>,
     /// Why the filesystem could not be opened, if it is a key problem.
     pub key_problem: Option<Error>,
+    /// Title, title ID, version and icon, when the game has them.
+    pub info: GameInfo,
+}
+
+/// Package metadata entries: param.sfo, icon0.png, param.json.
+const ENTRY_PARAM_SFO: u32 = 0x1000;
+const ENTRY_ICON0: u32 = 0x1200;
+const ENTRY_PARAM_JSON: u32 = 0x2000;
+
+/// Title and icon from the package's own metadata entries, which are
+/// readable even when the filesystem is encrypted.
+fn package_info(pkg: &Pkg) -> GameInfo {
+    let entry = |id| pkg.entry_data(id).ok().flatten();
+    GameInfo::from_files(
+        entry(ENTRY_PARAM_SFO).as_deref(),
+        entry(ENTRY_PARAM_JSON).as_deref(),
+        entry(ENTRY_ICON0).as_deref(),
+    )
+}
+
+/// Title and icon from sce_sys/ inside an opened package or game folder.
+fn sce_sys_info(input: &Input) -> GameInfo {
+    let quiet = |_: u64, _: u64, _: &str| {};
+    let read = |p: &str| input.read_file(p, &quiet).ok().flatten().filter(|d| d.len() as u64 <= crate::meta::MAX_META_SIZE);
+    GameInfo::from_files(
+        read("sce_sys/param.sfo").as_deref(),
+        read("sce_sys/param.json").as_deref(),
+        read("sce_sys/icon0.png").as_deref(),
+    )
 }
 
 pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
@@ -145,10 +175,11 @@ pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
     if &magic == CNT_MAGIC || &magic == FIH_MAGIC {
         let pkg = Pkg::open(path)?;
         let mut rows = package_rows(&pkg);
+        let mut info = package_info(&pkg);
         let pfs = match pkg.open_pfs(passcode) {
             Ok(p) => p,
             Err(e) if e.needs_key() => {
-                return Ok(Loaded { rows, input: None, files: Vec::new(), default_elf: None, key_problem: Some(e) })
+                return Ok(Loaded { rows, input: None, files: Vec::new(), default_elf: None, key_problem: Some(e), info })
             }
             Err(e) => return Err(e),
         };
@@ -168,9 +199,10 @@ pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
             .map(|(path, i)| FileRow { path, size: i.len(), is_dir: i.is_dir() })
             .collect();
         let input = Input::Package(pfs);
+        info.merge(sce_sys_info(&input));
         let default_elf = first_elf_candidate(&input, &files)?;
         rows.push(("Files".into(), files.iter().filter(|f| !f.is_dir).count().to_string()));
-        return Ok(Loaded { rows, input: Some(input), files, default_elf, key_problem: None });
+        return Ok(Loaded { rows, input: Some(input), files, default_elf, key_problem: None, info });
     }
 
     let head = magic.to_vec();
@@ -185,7 +217,14 @@ pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
         ("Format".into(), if is_self(&head) { "SELF (signed ELF)".into() } else { "ELF".into() }),
         ("Size".into(), fmt_size(size)),
     ];
-    Ok(Loaded { rows, input: Some(Input::Binary(path.to_path_buf())), files: Vec::new(), default_elf: None, key_problem: None })
+    Ok(Loaded {
+        rows,
+        input: Some(Input::Binary(path.to_path_buf())),
+        files: Vec::new(),
+        default_elf: None,
+        key_problem: None,
+        info: GameInfo::default(),
+    })
 }
 
 /// Open a decrypted game folder. It must have an eboot.bin (or, once the
@@ -212,7 +251,8 @@ fn load_folder(root: &Path) -> Result<Loaded> {
         _ if input.sniff(MAIN_EXECUTABLES[1])? => Some(MAIN_EXECUTABLES[1].to_string()),
         other => other,
     };
-    Ok(Loaded { rows, input: Some(input), files, default_elf, key_problem: None })
+    let info = sce_sys_info(&input);
+    Ok(Loaded { rows, input: Some(input), files, default_elf, key_problem: None, info })
 }
 
 /// Every entry under `root`, depth first and sorted, with `/`-separated paths.

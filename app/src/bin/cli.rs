@@ -52,6 +52,15 @@ fn main() -> ExitCode {
         let input = loaded.input.expect("loaded without a key problem");
         match args[0].as_str() {
             "info" => {
+                let info = &loaded.info;
+                for (k, v) in [("Title", &info.title), ("Title ID", &info.title_id), ("Version", &info.version)] {
+                    if let Some(v) = v {
+                        println!("{k:<14}  {v}");
+                    }
+                }
+                if let Some(icon) = &info.icon {
+                    println!("{:<14}  {}x{} PNG", "Icon", icon.width, icon.height);
+                }
                 for (k, v) in &loaded.rows {
                     println!("{k:<14}  {v}");
                 }
