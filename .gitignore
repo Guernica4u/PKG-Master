@@ -11,3 +11,5 @@ dist/
 out/
 app/target/
 .claude/
+shad/
+*.log
