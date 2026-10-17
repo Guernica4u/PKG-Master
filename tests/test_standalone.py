@@ -113,3 +113,47 @@ def test_script_info_and_list(tmp_path):
     assert listing.returncode == 0, listing.stderr
     assert "eboot.bin" in listing.stdout
     assert "param.sfo" in listing.stdout
+
+
+@pytest.mark.parametrize("ps5", [False, True])
+def test_matches_library_for_compressed_eboot(tmp_path, ps5):
+    pkg = tmp_path / "pfsc.pkg"
+    pkg.write_bytes(b.build_sample(ps5=ps5, compressed=True))
+
+    lib_out, script_out = tmp_path / "lib.elf", tmp_path / "script.elf"
+    lib = library_elf(pkg, lib_out)
+    scr = script_elf(pkg, script_out)
+    assert lib.returncode == 0, lib.stderr
+    assert scr.returncode == 0, scr.stderr
+    assert lib_out.read_bytes() == script_out.read_bytes()
+
+
+def test_matches_library_for_compressed_inner_image(tmp_path):
+    """A PS5 image whose pfs_image.dat and eboot.bin are both PFSC-compressed."""
+    tree = {"eboot.bin": b.Compressed(TREE["eboot.bin"], block_size=0x1000)}
+    pkg = tmp_path / "pfsc-inner.pkg"
+    pkg.write_bytes(b.build_ps5(tree, compress_inner=True))
+
+    lib_out, script_out = tmp_path / "lib.elf", tmp_path / "script.elf"
+    lib = library_elf(pkg, lib_out)
+    scr = script_elf(pkg, script_out)
+    assert lib.returncode == 0, lib.stderr
+    assert scr.returncode == 0, scr.stderr
+    assert lib_out.read_bytes() == script_out.read_bytes()
+    assert lib_out.read_bytes()[:4] == b"\x7fELF"
+
+
+def test_script_rejects_corrupt_compressed_eboot(tmp_path):
+    eboot = b.Compressed(TREE["eboot.bin"])
+    stored = bytearray(eboot.stored)
+    stored[-20] ^= 0xFF
+    pkg = tmp_path / "bad.pkg"
+    pkg.write_bytes(
+        b.build_pkg(b.build_pfs({"eboot.bin": b.Compressed(stored=bytes(stored), size=eboot.size)}))
+    )
+    out = tmp_path / "bad.elf"
+    result = script_elf(pkg, out)
+    assert result.returncode == 2
+    assert "PFSC" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not out.exists()
