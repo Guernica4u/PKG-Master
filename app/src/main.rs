@@ -106,6 +106,8 @@ struct App {
     icon_tex: Option<egui::TextureHandle>,
     /// The game title currently shown in the window's title bar.
     shown_title: Option<String>,
+    /// Run shadPKG was pressed but shadPKG.exe isn't installed.
+    shadpkg_missing: bool,
 }
 
 /// Something picked from a file's right-click menu.
@@ -155,6 +157,7 @@ impl App {
             pending_refresh: false,
             icon_tex: None,
             shown_title: None,
+            shadpkg_missing: false,
         }
     }
 
@@ -448,12 +451,9 @@ impl App {
     /// Runs shadPKG's `extract` on the open package (or one the user picks)
     /// into a chosen folder, with no console window.
     fn run_shadpkg(&mut self, ctx: &egui::Context) {
-        let Some(exe) = find_shadpkg().or_else(|| {
-            rfd::FileDialog::new()
-                .set_title("Locate shadpkg.exe")
-                .add_filter("shadpkg", &["exe"])
-                .pick_file()
-        }) else {
+        let Some(exe) = find_shadpkg() else {
+            // Not installed: explain where to get it and where to put it.
+            self.shadpkg_missing = true;
             return;
         };
         let open_pkg = self
@@ -604,6 +604,59 @@ impl App {
             }
             RowAction::ConvertFile(p) => self.convert_with(ctx, Input::Binary(p.clone()), None, &p),
             RowAction::Delete(p) => self.delete_confirm = Some(p),
+        }
+    }
+
+    /// Shown when Run shadPKG is pressed without shadPKG.exe installed.
+    fn shadpkg_missing_ui(&mut self, ctx: &egui::Context) {
+        if !self.shadpkg_missing {
+            return;
+        }
+        let dir = shadpkg_dir();
+        let (mut close, mut browse) = (false, false);
+        egui::Window::new("shadPKG isn't installed")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(480.0);
+                ui.label("Run shadPKG (PS4) needs shadPKG.exe, which isn't included with PKG Master.");
+                ui.add_space(4.0);
+                ui.label("1. Download shadPKG.exe from its official GitHub releases:");
+                if ui.link(SHADPKG_RELEASES).clicked() {
+                    open_url(SHADPKG_RELEASES);
+                }
+                ui.add_space(4.0);
+                ui.label("2. Drop it in this folder:");
+                ui.label(RichText::new(dir.display().to_string()).monospace());
+                ui.add_space(4.0);
+                ui.label("3. Press Run shadPKG (PS4) again.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Open download page").clicked() {
+                        open_url(SHADPKG_RELEASES);
+                    }
+                    if ui.button("Open shadpkg folder").clicked() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                    }
+                    browse = ui.button("I have it elsewhere…").on_hover_text("Pick your shadPKG.exe; it gets copied into the shadpkg folder").clicked();
+                    close = ui.button("Close").clicked();
+                });
+            });
+        if browse {
+            if let Some(file) = rfd::FileDialog::new().set_title("Pick shadPKG.exe").add_filter("Program", &["exe"]).pick_file() {
+                let dest = dir.join(SHADPKG_NAMES[0]);
+                let copied = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&file, &dest));
+                self.status = match copied {
+                    Ok(_) => Status::Ok(format!("Copied shadPKG.exe into {}. Press Run shadPKG (PS4) again.", dir.display())),
+                    Err(e) => Status::Err(format!("Could not copy it into {}: {e}", dir.display())),
+                };
+                close = true;
+            }
+        }
+        if close {
+            self.shadpkg_missing = false;
         }
     }
 
@@ -901,10 +954,23 @@ fn file_label(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
 }
 
-const SHADPKG_FALLBACK: &str = r"C:\Documents 2.0\Vibecoding\PS5 PKG master\shad\shadpkg.exe";
+/// shadPKG's official releases, where users download shadPKG.exe themselves.
+const SHADPKG_RELEASES: &str = "https://github.com/seregonwar/ShadPKG/releases";
+/// The folder next to pkgmaster-gui.exe where shadPKG.exe goes.
+const SHADPKG_DIR: &str = "shadpkg";
+const SHADPKG_NAMES: [&str; 2] = ["shadPKG.exe", "shadpkg.exe"];
 
-/// Looks for shadpkg.exe: `PKGMASTER_SHADPKG`, then next to (or in a `shad`
-/// folder beside) this exe or any of its parent folders, then the known path.
+/// `shadpkg\` next to this app: the place to drop shadPKG.exe.
+fn shadpkg_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join(SHADPKG_DIR)))
+        .unwrap_or_else(|| PathBuf::from(SHADPKG_DIR))
+}
+
+/// Looks for shadPKG.exe: `PKGMASTER_SHADPKG`, then in the `shadpkg\` folder
+/// next to this app, then next to (or in a `shadpkg\` or `shad\` folder
+/// beside) this app or any of its parent folders.
 fn find_shadpkg() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("PKGMASTER_SHADPKG").map(PathBuf::from) {
         if p.is_file() {
@@ -913,13 +979,21 @@ fn find_shadpkg() -> Option<PathBuf> {
     }
     let exe = std::env::current_exe().ok()?;
     for dir in exe.ancestors().skip(1) {
-        for candidate in [dir.join("shadpkg.exe"), dir.join("shad").join("shadpkg.exe")] {
-            if candidate.is_file() {
-                return Some(candidate);
+        for sub in [Path::new(SHADPKG_DIR), Path::new("shad"), Path::new("")] {
+            for name in SHADPKG_NAMES {
+                let candidate = dir.join(sub).join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
     }
-    Some(PathBuf::from(SHADPKG_FALLBACK)).filter(|p| p.is_file())
+    None
+}
+
+/// Open a web page in the default browser.
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("explorer").arg(url).spawn();
 }
 
 fn shadpkg_extract(exe: &Path, pkg: &Path, out: &Path, progress: &dyn Fn(u64, u64, &str)) -> Result<String, Error> {
@@ -1137,6 +1211,7 @@ impl eframe::App for App {
 
         self.history_ui(ctx);
         self.delete_ui(ctx);
+        self.shadpkg_missing_ui(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
 
