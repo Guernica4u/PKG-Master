@@ -1,195 +1,133 @@
-# pkgmaster
+# PKG Master
 
-Inspect PS4/PS5 `.pkg` packages and convert the files inside them to standard
-formats. The first supported target is **ELF** — extraction of `eboot.bin`
-(and other modules such as `right.sprx`) out of the package and out of its
-SELF container, producing a normal ELF64 image that `readelf`, `objdump`,
-Ghidra, IDA and friends can open.
+A small Windows app for PS4/PS5 game files **you dumped legally yourself**.
+It opens fake-signed and debug `.pkg` files and decrypted game folders, turns
+the game's executable into a standard ELF, unpacks packages, and can run a
+decrypted PS5 game through [AnyPS5](https://github.com/boykopovar/AnyPS5).
 
-```
-pkgmaster convert game.pkg --to elf -o eboot.elf
-```
+**[⬇ Download the latest release](https://github.com/Guernica4u/PKG-Master/releases/latest)**:
+unzip it and run `pkgmaster-gui.exe`. Nothing to install.
 
-## Status
+> Windows may say "Windows protected your PC" because the app isn't
+> code-signed. Click **More info → Run anyway**.
 
-| Capability | State |
+## What it does
+
+| Button | What happens |
 | --- | --- |
-| PS4 `\x7FCNT` header + entry table | works |
-| PS5 `\x7FFIH` finalized image + embedded container | works |
-| Entry names, `param.sfo`, icons, metadata entries | works (encrypted entries need a passcode) |
-| PFS filesystem: unsigned `0xA8`, signed-32 `0x2C8`, signed-64 `0x310` inodes | works |
-| Encrypted PFS (AES-XTS, passcode/EKPFS derived keys) | works |
-| PS5 outer PFS → inner `pfs_image.dat` | works |
-| SELF → standard ELF | works (unencrypted/uncompressed segments) |
-| Extract package files to a folder | works |
-| Compressed file data (PFSC, zlib/deflate blocks) | works — corrupt streams are refused, never padded |
-| Retail package decryption | **not possible and not attempted** (see below) |
+| **Open file…** | Open a `.pkg`, or a single `eboot.bin` / `.prx` / `.sprx` / `.elf`. You can also drag a file onto the window or onto the `.exe`. |
+| **Open folder…** | Open a decrypted game folder (the one holding `eboot.bin` or `eboot.elf`, `sce_module/` and `sce_sys/`). Other folders are listed so you can click through them: a folder with a single `.pkg` opens it, and a folder with a single subfolder steps into it. |
+| **Run shadPKG (PS4)…** | Runs your own `shadpkg.exe` on a PS4 `.pkg` (see [shadPKG](#shadpkg)). |
+| **Back / Refresh** | Go up one folder, or reload what's open. |
+| **History** | Everything the app has written, with **Revert** and **Show in Explorer**. See [History](#history). |
+| **Convert to ELF…** | Turns the selected file (by default `eboot.bin`) from Sony's SELF format into a standard ELF64, which is the file type AnyPS5 needs. Saves into a new `<name>-elf` folder next to the game files by default. |
+| **Extract all files…** | Unpacks everything inside a `.pkg` into a normal folder. |
+| **Run in AnyPS5…** | For a decrypted PS5 game folder: converts the executables, runs your AnyPS5 relinker, and sets up a ready-to-run folder inside your AnyPS5 folder. **Launch** then starts it. |
+| **Passcode** | Only shown for encrypted fake/debug packages. Usually 32 zeros. |
 
-## Install
+**Right-click** any file in a list for **Convert to ELF**, **Show in
+Explorer**, **Copy path** and **Delete** (which moves it to the Recycle Bin).
+Files inside a `.pkg` are read-only, so those only get Convert and Copy path.
+
+### History
+
+Every Convert, Extract, shadPKG and AnyPS5 run is recorded. If something was
+already at the save location, the app backs it up first. **Revert** deletes
+what the app wrote and puts the old version back. A failed operation is rolled
+back automatically, so it never leaves half-written files. The history is kept
+between sessions in `%APPDATA%\PKG Master\`; **Clear history** deletes the
+backups to free the space.
+
+### AnyPS5
+
+[AnyPS5](https://github.com/boykopovar/AnyPS5) turns **PS5** games (title IDs
+starting with `PPSA`) into Windows programs. It isn't included, so download
+its release yourself:
+
+1. Unzip AnyPS5's `prx-windows-v….zip` (the folder with `libs/`) and put its
+   `relinker….exe` in the same folder.
+2. In PKG Master, open your decrypted PS5 game folder and click
+   **AnyPS5 folder…** once to point at that folder. Any `.exe` with
+   "relinker" in its name is found automatically.
+3. Click **Run in AnyPS5…**, then **Launch**.
+
+PS4 games (`CUSA…`) aren't supported by AnyPS5; the app warns you before
+starting. AnyPS5 is early software and only a few games work so far.
+
+### shadPKG
+
+The **Run shadPKG (PS4)…** button runs a `shadpkg.exe` that you provide. Put
+it next to `pkgmaster-gui.exe` (or in a `shad\` folder beside it), or the app
+asks where it is. shadPKG isn't part of PKG Master and isn't included in the
+download.
+
+## What it won't do
+
+- **No Sony keys are included, and retail packages can't be decrypted.**
+  Packages from the PlayStation Store or a disc are encrypted with console
+  keys. The legal route is to dump the game on your own console, which writes
+  out the files already decrypted; PKG Master works from there.
+- Encrypted or broken input fails with a clear message. The app never writes
+  a plausible-looking but wrong file.
+
+Use it only on games you own and are allowed to dump where you live.
+
+## Building from source
+
+The app is Rust (in [`app/`](app/)); the original command-line tool is
+Python (in [`pkgmaster/`](pkgmaster/)). Both read the same formats and produce
+byte-identical output, which [`app/tests/parity.py`](app/tests/parity.py)
+checks.
 
 ```bash
+# Desktop app (needs Rust, MSVC toolchain on Windows)
+cd app
+cargo build --release          # target/release/pkgmaster-gui.exe and pkgmaster-cli.exe
+cargo test
+
+# Python tool
 python -m venv .venv
-.venv/bin/pip install -e ".[dev]"      # or: .venv/bin/pip install cryptography
+.venv/Scripts/pip install -e ".[dev]"
+.venv/Scripts/python -m pytest -q
+python app/tests/parity.py     # Rust vs Python, byte for byte
 ```
 
-Requires Python 3.10+ and `cryptography`. The only entry point is the
-`pkgmaster` command (or `python -m pkgmaster`).
+### Command line
 
-## Try it without a real package
-
-Real packages are large and often encrypted, so the tool ships a generator for
-structurally valid synthetic ones:
+`pkgmaster-cli.exe` (in the release zip) covers the basics:
 
 ```bash
-python -m pkgmaster.synth demo.pkg                    # PS4 fake package
-python -m pkgmaster.synth demo.pkg --encrypted        # encrypted PFS
-python -m pkgmaster.synth demo.pkg --ps5              # PS5 FIH image
-
-pkgmaster info demo.pkg
-pkgmaster convert demo.pkg --to elf -o eboot.elf
+pkgmaster-cli info    game.pkg [--passcode P]
+pkgmaster-cli list    game.pkg
+pkgmaster-cli convert game.pkg eboot.elf [--path sce_module/libc.prx]
+pkgmaster-cli extract game.pkg out/
 ```
 
-These are synthetic fixtures, not real games: they exercise the format parsing,
-not any copyrighted content.
+The Python tool (`pip install -e .`, then `pkgmaster --help`) has more:
+`info`, `entries`, `list`, `tree`, `extract`, `convert` and `elf`, with
+`--json` output. Exit codes: `0` ok, `2` bad file, `3` passcode needed or
+wrong, `4` not supported yet.
 
-## Commands
+### Formats supported
 
-```bash
-pkgmaster info    game.pkg [--json]                    # header, content id, PFS summary
-pkgmaster entries game.pkg [--json]                    # metadata entries in the container
-pkgmaster list    game.pkg [--dirs] [--pattern linux]  # files inside the PFS
-pkgmaster tree    game.pkg                             # filesystem tree
-pkgmaster extract game.pkg -o out/ [--path sce_sys]    # write files to disk
-pkgmaster convert game.pkg --to elf [-o eboot.elf]     # convert content (default: eboot.bin)
-pkgmaster elf     eboot.bin [-o eboot.elf]             # inspect/convert a standalone module
-```
-
-Key options, accepted by every command that reads content:
-
-| Option | Meaning |
+| | |
 | --- | --- |
-| `--passcode P` | 32-character FPKG passcode (or set `PKGMASTER_PASSCODE`) |
-| `--ekpfs HEX` | explicit 32-byte EKPFS key as 64 hex characters |
-| `--new-crypt` | force the alternate PS5-era key schedule |
+| PS4 `\x7FCNT` and PS5 `\x7FFIH` packages | yes |
+| PFS filesystem, all three inode layouts | yes |
+| Passcode-encrypted PFS (AES-XTS) | yes |
+| PFSC-compressed files | yes |
+| SELF → ELF (plaintext segments) | yes |
+| Retail decryption | no, by design |
 
-Example session on a synthetic PS4 package:
+Format details are documented in [`HANDOFF.md`](HANDOFF.md).
 
-```
-$ pkgmaster info demo.pkg
-file            demo.pkg
-format          PS4
-content id      EP0000-CUSA00000_00-0000000000000000
-content type    GD (game data)
-pfs image       0x2000 (576.0 KiB)
-entries         2
-pfs             v1, block 0x10000, 7 inodes
-pfs root        5 entries
-
-$ pkgmaster convert demo.pkg --to elf -o eboot.elf
-source          eboot.bin
-output          eboot.elf (4.1 KiB)
-elf             ET_SCE_EXEC_ASLR / EM_X86_64 / FreeBSD
-entry point     0x1010
-segments        3 copied, 0 zero-filled
-
-$ file eboot.elf
-eboot.elf: ELF 64-bit LSB x86-64, version 1 (FreeBSD)
-```
-
-## How it works
-
-```
-                 ┌──────────────────────────── PS4 ───────────────────────────┐
-  game.pkg  ───► │ \x7FCNT header → entry table → names / param.sfo / icons   │
-                 │ pfs_image_offset+size ─► PFS image ─► uroot ─► eboot.bin   │
-                 └───────────────────────────────────────────────────────────┘
-                 ┌──────────────────────────── PS5 ───────────────────────────┐
-  game.pkg  ───► │ \x7FFIH header → outer PFS → pfs_image.dat → inner PFS     │
-                 │ embedded \x7FCNT → metadata entries                        │
-                 └───────────────────────────────────────────────────────────┘
-                                        │
-                    PFS file (eboot.bin / *.sprx / *.prx)
-                                        ▼
-        SELF container? ── yes ─► map segment payloads onto ELF program headers
-                        └ no  ──► already an ELF, pass through unchanged
-                                        ▼
-                                   eboot.elf
-```
-
-Module map:
-
-| File | Responsibility |
-| --- | --- |
-| `pkgmaster/binary.py` | positional, bounds-checked readers; nested windows |
-| `pkgmaster/crypto.py` | passcode→key derivation, PFS XTS key schedule, XTS reader |
-| `pkgmaster/pkg.py` | PS4 CNT and PS5 FIH containers, entry table, entry decryption |
-| `pkgmaster/pfs.py` | PFS superblock, the three inode layouts, dirents, file reads |
-| `pkgmaster/elf.py` | ELF header/program header parsing, SCE type names |
-| `pkgmaster/self.py` | SELF container parsing, ELF reconstruction |
-| `pkgmaster/convert.py` | content discovery + the `CONVERTERS` registry |
-| `pkgmaster/cli.py` | argparse front end and exit codes |
-| `pkgmaster/synth.py` | synthetic package/module generator used by tests and demos |
-
-Everything is streamed through positional reads, so a 40 GB package is never
-loaded into memory — only the bytes actually requested are touched.
-
-Exit codes: `0` success, `2` bad file/usage, `3` a key is required or wrong,
-`4` recognised but unimplemented.
-
-## Keys, encryption, and what this tool will not do
-
-* **No keys, no content keys, and no RSA private keys are bundled.**
-* Fake/debug packages can be decrypted with the passcode alone: the passcode
-  plus the content id derive the entry keys and the PFS EKPFS.
-* **Retail packages cannot be decrypted here, by design.** Their keys come from
-  console-side material that is not derivable from the package, and providing
-  it would be DRM circumvention. pkgmaster reports what it needs and stops.
-* Encrypted or compressed SELF segments are refused with a clear message
-  instead of emitting a corrupt ELF.
-
-Use it on packages and dumps you are entitled to work with.
-
-## Roadmap
-
-The conversion layer is a registry (`CONVERTERS` in `convert.py`), so the next
-targets are mostly additive:
-
-1. `param.sfo` → JSON, and `param.json` formatting.
-2. `icon0.png` / DDS image passthrough and conversion.
-3. `snd0.at9` → WAV.
-4. Folder/ISO export of a whole PFS image.
-5. PS5 SELF stage-2 payload handling beyond fake-self modules.
-
-## Verified vs not
-
-Be precise about what has been proven:
-
-* **Verified** with synthetic fixtures and the test suite: PS4 and PS5 container
-  parsing, all three PFS inode layouts, multi-block files, PFSC-compressed files
-  (including a compressed PS5 `pfs_image.dat`), encrypted PFS
-  round-trips (right key works, wrong key is detected), encrypted metadata
-  entries, SELF→ELF reconstruction, and the full CLI surface. Converted ELFs
-  were checked with GNU `readelf` and `file`.
-* **Not verified against real retail packages**, because none can be shipped
-  here and none can be decrypted without console keys. Field-level offsets come
-  from the documented formats and were cross-checked against two independent
-  working implementations.
-* **Not implemented**: `license.dat` decryption for
-  retail key index 3, and delta-patch specific entries.
-
-## Tests
-
-```bash
-.venv/bin/python -m pytest -q      # 89 tests
-```
-
-## References
+## Credits
 
 Format details were cross-checked against
-[LibOrbisPkg](https://github.com/maxton/LibOrbisPkg) (PS4 PKG/PFS, LGPL),
-[orbis-pfs](https://github.com/videobitva/orbis) (Rust PFS reader),
-[MkPFS](https://github.com/PSBrew/MkPFS) (PFS image builder),
-[LibProsperoPKG's PS5 format write-up](https://github.com/SvenGDK/LibProsperoPKG),
-and [ps4_unfself](https://github.com/SocraticBliss/ps4_unfself) for the SELF
-layout. No third-party code was copied; the implementations here were written
-from the documented structures.
+[LibOrbisPkg](https://github.com/maxton/LibOrbisPkg),
+[orbis-pfs](https://github.com/videobitva/orbis),
+[MkPFS](https://github.com/PSBrew/MkPFS),
+[LibProsperoPKG](https://github.com/SvenGDK/LibProsperoPKG) and
+[ps4_unfself](https://github.com/SocraticBliss/ps4_unfself). No third-party
+code was copied. AnyPS5 is by
+[boykopovar and contributors](https://github.com/boykopovar/AnyPS5).

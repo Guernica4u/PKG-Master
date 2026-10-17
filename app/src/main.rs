@@ -97,6 +97,20 @@ struct App {
     /// A revert waiting for confirmation: (id, target, had a backup).
     revert_confirm: Option<(u64, PathBuf, bool)>,
     clear_confirm: bool,
+    /// A file or folder waiting for confirmation before going to the Recycle Bin.
+    delete_confirm: Option<PathBuf>,
+    /// Reload what is open once the running job finishes (after a delete).
+    refresh_after_job: bool,
+    pending_refresh: bool,
+}
+
+/// Something picked from a file's right-click menu.
+enum RowAction {
+    /// Convert a file inside the open package or game folder.
+    ConvertInner(String),
+    /// Convert a standalone file on disk.
+    ConvertFile(PathBuf),
+    Delete(PathBuf),
 }
 
 #[derive(Clone)]
@@ -132,6 +146,9 @@ impl App {
             show_history: false,
             revert_confirm: None,
             clear_confirm: false,
+            delete_confirm: None,
+            refresh_after_job: false,
+            pending_refresh: false,
         }
     }
 
@@ -208,20 +225,35 @@ impl App {
 
     fn convert(&mut self, ctx: &egui::Context) {
         let Some(input) = self.loaded.as_ref().and_then(|l| l.input.clone()) else { return };
+        let Some(base) = self.path.clone() else { return };
         let inner = self.selected.clone();
-        let source_name = match (&input, &inner, &self.path) {
-            (Input::Package(_) | Input::Folder(_), Some(p), _) => p.clone(),
-            (_, _, Some(path)) => path.to_string_lossy().into_owned(),
-            _ => "eboot.bin".into(),
+        self.convert_with(ctx, input, inner, &base);
+    }
+
+    /// Convert to ELF. The save dialog opens in a "<name>-elf" folder next to
+    /// the game files (`base`), which is created for it.
+    fn convert_with(&mut self, ctx: &egui::Context, input: Input, inner: Option<String>, base: &Path) {
+        let source_name = match (&input, &inner) {
+            (Input::Package(_) | Input::Folder(_), Some(p)) => p.clone(),
+            _ => base.to_string_lossy().into_owned(),
         };
+        let elf_dir = elf_folder_for(base);
+        let created = !elf_dir.exists() && std::fs::create_dir_all(&elf_dir).is_ok();
         let mut dialog = rfd::FileDialog::new()
             .set_title("Save ELF as")
             .set_file_name(default_output_name(&source_name))
             .add_filter("ELF file", &["elf"]);
-        if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
+        if elf_dir.is_dir() {
+            dialog = dialog.set_directory(&elf_dir);
+        } else if let Some(dir) = base.parent() {
             dialog = dialog.set_directory(dir);
         }
-        let Some(out) = dialog.save_file() else { return };
+        let out = dialog.save_file();
+        // Don't leave an empty "-elf" folder behind if it wasn't used.
+        if created && !out.as_ref().is_some_and(|o| o.starts_with(&elf_dir)) {
+            let _ = std::fs::remove_dir(&elf_dir);
+        }
+        let Some(out) = out else { return };
         self.status = Status::Info("Converting…".into());
         let (hist, action) = (self.history.clone(), format!("Converted {source_name} to ELF"));
         self.spawn_job(ctx, move |progress| {
@@ -506,6 +538,10 @@ impl App {
                     self.status = Status::Info(m);
                 }
                 Msg::Done(result) => {
+                    if self.refresh_after_job {
+                        self.refresh_after_job = false;
+                        self.pending_refresh = true;
+                    }
                     self.busy = false;
                     self.progress = None;
                     self.status = match result {
@@ -528,6 +564,55 @@ impl App {
         }
         if let Some(path) = dialog.pick_file() {
             self.start_load(ctx, path);
+        }
+    }
+
+    fn apply_row_action(&mut self, ctx: &egui::Context, action: RowAction) {
+        match action {
+            RowAction::ConvertInner(p) => {
+                self.selected = Some(p);
+                self.convert(ctx);
+            }
+            RowAction::ConvertFile(p) => self.convert_with(ctx, Input::Binary(p.clone()), None, &p),
+            RowAction::Delete(p) => self.delete_confirm = Some(p),
+        }
+    }
+
+    /// Confirmation before moving a file or folder to the Recycle Bin.
+    fn delete_ui(&mut self, ctx: &egui::Context) {
+        let Some(p) = self.delete_confirm.clone() else { return };
+        let mut decision = None;
+        egui::Window::new("Move to the Recycle Bin?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(460.0);
+                ui.label(p.display().to_string());
+                ui.weak("You can restore it from the Recycle Bin.");
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        match decision {
+            Some(true) => {
+                self.delete_confirm = None;
+                self.refresh_after_job = true;
+                self.status = Status::Info(format!("Moving {} to the Recycle Bin…", file_label(&p)));
+                self.spawn_job(ctx, move |_| {
+                    trash::delete(&p).map_err(|e| {
+                        Error::Conversion(format!("could not move {} to the Recycle Bin: {e}", p.display()))
+                    })?;
+                    Ok(format!("Moved {} to the Recycle Bin.", p.display()))
+                });
+            }
+            Some(false) => self.delete_confirm = None,
+            None => {}
         }
     }
 
@@ -726,6 +811,36 @@ fn tracked<T>(
     result
 }
 
+/// Where Convert to ELF saves by default: "<name>-elf" next to `base` (the
+/// opened package, game folder or file).
+fn elf_folder_for(base: &Path) -> PathBuf {
+    let parent = base.parent().unwrap_or(Path::new("."));
+    let name = if base.is_dir() { base.file_name() } else { base.file_stem() };
+    let name = name.map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "game".into());
+    parent.join(format!("{name}-elf"))
+}
+
+fn is_pkg_path(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pkg"))
+}
+
+/// The right-click options shared by every real file or folder on disk.
+fn file_menu(ui: &mut egui::Ui, full: &Path, action: &mut Option<RowAction>) {
+    if ui.button("Show in Explorer").clicked() {
+        reveal(full);
+        ui.close_menu();
+    }
+    if ui.button("Copy path").clicked() {
+        ui.ctx().copy_text(full.display().to_string());
+        ui.close_menu();
+    }
+    ui.separator();
+    if ui.button("Delete (to Recycle Bin)…").clicked() {
+        *action = Some(RowAction::Delete(full.to_path_buf()));
+        ui.close_menu();
+    }
+}
+
 /// Show a file or folder in File Explorer (its folder, if it is gone).
 fn reveal(p: &Path) {
     let _ = if p.exists() {
@@ -857,6 +972,11 @@ fn describe_error(e: &Error) -> String {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_messages();
+        if std::mem::take(&mut self.pending_refresh) {
+            if let Some(p) = self.path.clone() {
+                self.open(ctx, p, false);
+            }
+        }
 
         let dropped = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
         if let Some(path) = dropped {
@@ -986,6 +1106,7 @@ impl eframe::App for App {
         });
 
         self.history_ui(ctx);
+        self.delete_ui(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
 
@@ -1016,22 +1137,33 @@ impl eframe::App for App {
                     return;
                 }
                 let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-                let mut clicked = None;
+                let (mut clicked, mut action) = (None, None);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
                     for r in &rows[range] {
                         ui.horizontal(|ui| {
                             let size = if r.is_dir { "folder".to_string() } else { fmt_size(r.size) };
                             ui.label(RichText::new(format!("{size:>10}")).monospace().weak());
                             let name = if r.is_dir { format!("{}/", r.name) } else { r.name.clone() };
-                            let enabled = !self.busy && (r.is_dir || r.openable);
-                            if ui.add_enabled(enabled, egui::SelectableLabel::new(false, RichText::new(name).monospace())).clicked() {
+                            let can_open = r.is_dir || r.openable;
+                            let text = if can_open { RichText::new(name).monospace() } else { RichText::new(name).monospace().weak() };
+                            let resp = ui.add_enabled(!self.busy, egui::SelectableLabel::new(false, text));
+                            if resp.clicked() && can_open {
                                 clicked = Some(r.path.clone());
                             }
+                            resp.context_menu(|ui| {
+                                if r.openable && !is_pkg_path(&r.path) && ui.button("Convert to ELF…").clicked() {
+                                    action = Some(RowAction::ConvertFile(r.path.clone()));
+                                    ui.close_menu();
+                                }
+                                file_menu(ui, &r.path, &mut action);
+                            });
                         });
                     }
                 });
                 if let Some(p) = clicked {
                     self.start_load(ctx, p);
+                } else if let Some(a) = action {
+                    self.apply_row_action(ctx, a);
                 }
                 return;
             }
@@ -1058,6 +1190,7 @@ impl eframe::App for App {
             let is_package = matches!(loaded.input, Some(Input::Package(_)));
             let has_files = matches!(loaded.input, Some(Input::Package(_) | Input::Folder(_)));
             let mut do_convert = false;
+            let mut menu_action = None;
             let mut do_extract = false;
             let mut do_run = false;
             let mut do_pick_anyps5 = false;
@@ -1129,6 +1262,10 @@ impl eframe::App for App {
                     "Files in the folder (click one to choose what gets converted):"
                 });
                 let files: Vec<_> = loaded.files.iter().filter(|f| !f.is_dir).collect();
+                let folder_root = match &loaded.input {
+                    Some(Input::Folder(r)) => Some(r.clone()),
+                    _ => None,
+                };
                 let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
                 let mut clicked = None;
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, files.len(), |ui, range| {
@@ -1136,9 +1273,27 @@ impl eframe::App for App {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{:>10}", fmt_size(f.size))).monospace().weak());
                             let selected = self.selected.as_deref() == Some(f.path.as_str());
-                            if ui.selectable_label(selected, RichText::new(&f.path).monospace()).clicked() {
+                            let resp = ui.selectable_label(selected, RichText::new(&f.path).monospace());
+                            if resp.clicked() {
                                 clicked = Some(f.path.clone());
                             }
+                            resp.context_menu(|ui| {
+                                if ui.add_enabled(!self.busy, egui::Button::new("Convert to ELF…")).clicked() {
+                                    menu_action = Some(RowAction::ConvertInner(f.path.clone()));
+                                    ui.close_menu();
+                                }
+                                match &folder_root {
+                                    // A real file on disk: all the options.
+                                    Some(root) => file_menu(ui, &root.join(f.path.split('/').collect::<PathBuf>()), &mut menu_action),
+                                    // Inside a .pkg: read-only, so no Delete or Explorer.
+                                    None => {
+                                        if ui.button("Copy path").clicked() {
+                                            ui.ctx().copy_text(f.path.clone());
+                                            ui.close_menu();
+                                        }
+                                    }
+                                }
+                            });
                         });
                     }
                 });
@@ -1147,6 +1302,9 @@ impl eframe::App for App {
                 }
             }
 
+            if let Some(a) = menu_action {
+                self.apply_row_action(ctx, a);
+            }
             if do_convert {
                 self.convert(ctx);
             }
