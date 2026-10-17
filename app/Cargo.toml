@@ -1,6 +1,6 @@
 [package]
 name = "pkgmaster"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "PS4/PS5 package inspector and PKG-to-ELF converter (desktop app)"
 license = "MIT"
