@@ -26,6 +26,7 @@ hmac = "0.12"
 flate2 = "1"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
 rfd = "0.15"
+trash = "5"
 
 [profile.release]
 opt-level = 3
