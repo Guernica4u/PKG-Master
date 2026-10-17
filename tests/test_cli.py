@@ -153,6 +153,18 @@ def test_encrypted_package_requires_passcode(tmp_path):
     assert "eboot.bin" in result.stdout
 
 
+def test_encrypted_package_wrong_passcode_is_reported(tmp_path):
+    tree = {"eboot.bin": b.build_self(b.build_elf([CODE]))}
+    path = tmp_path / "enc.pkg"
+    path.write_bytes(b.build_pkg(b.build_pfs(tree, encrypted=True)))
+
+    out = tmp_path / "bad.elf"
+    result = run("convert", str(path), "--to", "elf", "-o", str(out), "--passcode", "f" * 32)
+    assert result.returncode == 3, result.stderr
+    assert "Traceback" not in result.stderr
+    assert not out.exists()
+
+
 def test_encrypted_self_reports_unsupported(tmp_path):
     blob = tmp_path / "locked.bin"
     blob.write_bytes(b.build_self(b.build_elf([CODE, RODATA]), encrypt_first=True))
