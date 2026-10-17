@@ -12,6 +12,7 @@ pub mod convert;
 pub mod crypto;
 pub mod elf;
 pub mod error;
+pub mod history;
 pub mod pfs;
 pub mod pkg;
 
