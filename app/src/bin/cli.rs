@@ -5,6 +5,10 @@
 //!   pkgmaster-cli list    FILE [--passcode P]
 //!   pkgmaster-cli convert FILE OUT [--passcode P] [--path P]
 //!   pkgmaster-cli extract FILE DIR [--passcode P]
+//!   pkgmaster-cli export  FILE|FOLDER DIR [--passcode P]
+//!
+//! `export` lays a package or a decrypted game folder out for AnyPS5:
+//! source/eboot.elf, source/sce_module/*, app0/ and HOW-TO-RUN.txt.
 //!
 //! Exit codes match the Python CLI: 0 ok, 2 bad file/usage, 3 key required or
 //! wrong, 4 recognised but unimplemented.
@@ -12,11 +16,11 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use pkgmaster::convert::{convert_to_elf, extract_all, load, Input};
+use pkgmaster::convert::{convert_to_elf, export_anyps5, extract_all, load, Input, MODULE_DIR};
 use pkgmaster::Error;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: pkgmaster-cli info|list|convert|extract FILE [OUT] [--passcode P] [--path P]");
+    eprintln!("usage: pkgmaster-cli info|list|convert|extract|export FILE [OUT] [--passcode P] [--path P]");
     ExitCode::from(2)
 }
 
@@ -77,6 +81,22 @@ fn main() -> ExitCode {
                 };
                 let n = extract_all(pfs, Path::new(out), &quiet)?;
                 println!("{n} file(s) written to {out}");
+            }
+            "export" => {
+                let out = args.get(2).ok_or_else(|| Error::Conversion("export needs a folder".into()))?;
+                let r = export_anyps5(&input, Path::new(out), &quiet)?;
+                println!("eboot     source/eboot.elf ({} / {})", r.eboot.type_name(), r.eboot.machine_name());
+                for m in &r.modules {
+                    println!("module    source/{MODULE_DIR}/{m}");
+                }
+                for (m, why) in &r.skipped {
+                    println!("skipped   {MODULE_DIR}/{m}: {why}");
+                }
+                println!("app0      {} file(s)", r.app0_files);
+                for w in &r.warnings {
+                    println!("warning: {w}");
+                }
+                println!("exported to {out}; see HOW-TO-RUN.txt");
             }
             _ => return Err(Error::Conversion(format!("unknown command {:?}", args[0]))),
         }
