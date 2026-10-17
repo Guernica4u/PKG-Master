@@ -27,6 +27,7 @@ import hmac
 import os
 import struct
 import sys
+import zlib
 
 try:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -407,6 +408,104 @@ class Inode:
         )
 
 
+class StoredData:
+    """Strict reads of the bytes an inode stores (the PFSC stream if compressed)."""
+
+    def __init__(self, pfs: "Pfs", inode: Inode, size: int):
+        self.pfs, self.size, self.name = pfs, size, f"inode {inode.number}"
+        self.blocks = pfs.block_map(inode)
+        if len(self.blocks) * pfs.header.block_size < size:
+            raise PkgError(f"inode {inode.number}: block map is shorter than its data")
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        if offset < 0 or length < 0 or offset + length > self.size:
+            raise PkgError(f"{self.name}: read 0x{offset:X}+0x{length:X} is past the stored data")
+        bs = self.pfs.header.block_size
+        out = bytearray()
+        while len(out) < length:
+            index, skip = divmod(offset + len(out), bs)
+            take = min(bs - skip, length - len(out))
+            out += self.pfs.reader.read_at(self.blocks[index] * bs + skip, take)
+        return bytes(out)
+
+    def __len__(self) -> int:
+        return self.size
+
+
+class PfscReader:
+    """PFSC block-compressed file: header, u64 block-offset table, zlib blocks.
+
+    A block whose stored size equals the block size is raw. Any inconsistency
+    raises instead of producing padded or guessed bytes.
+    """
+
+    def __init__(self, stored, size: int, name: str):
+        self.stored, self.size, self.name = stored, size, name
+        if len(stored) < 0x30:
+            raise PkgError(f"{name}: PFSC header is truncated")
+        h = stored.read_at(0, 0x30)
+        if h[:4] != b"PFSC":
+            raise PkgError(f"{name}: compressed file has no PFSC magic")
+        self.block_size = u32(h, 0x0C)
+        if not 0 < self.block_size <= 0x100000 or u64(h, 0x10) != self.block_size:
+            raise PkgError(f"{name}: implausible PFSC block size 0x{self.block_size:X}")
+        self.table, self.data_start = u64(h, 0x18), u64(h, 0x20)
+        if u64(h, 0x28) != size:
+            raise PkgError(f"{name}: PFSC header size disagrees with the inode")
+        self.count = -(-size // self.block_size)
+        table_end = self.table + (self.count + 1) * 8
+        if self.table < 0x30 or table_end > len(stored):
+            raise PkgError(f"{name}: PFSC block table runs past the end of the stream")
+        if not table_end <= self.data_start <= len(stored):
+            raise PkgError(f"{name}: PFSC data start is out of range")
+        self.cached: tuple[int, bytes] | None = None
+
+    def block(self, index: int) -> bytes:
+        if self.cached is not None and self.cached[0] == index:
+            return self.cached[1]
+        if not 0 <= index < self.count:
+            raise PkgError(f"{self.name}: PFSC block {index} is out of range")
+        bs = self.block_size
+        raw = self.stored.read_at(self.table + index * 8, 16)
+        start, end = u64(raw, 0), u64(raw, 8)
+        if not self.data_start <= start < end <= len(self.stored) or end - start > bs:
+            raise PkgError(f"{self.name}: PFSC block {index} has a bad table entry")
+        data = self.stored.read_at(start, end - start)
+        decoded = data if len(data) == bs else inflate(data, bs, f"{self.name}: PFSC block {index}")
+        expected = min(bs, self.size - index * bs)
+        if len(decoded) != expected and not (index == self.count - 1 and len(decoded) == bs):
+            raise PkgError(f"{self.name}: PFSC block {index} decodes to the wrong length")
+        self.cached = (index, decoded[:expected])
+        return self.cached[1]
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        length = max(0, min(length, self.size - offset))
+        out = bytearray()
+        while len(out) < length:
+            index, skip = divmod(offset + len(out), self.block_size)
+            out += self.block(index)[skip : skip + length - len(out)]
+        return bytes(out)
+
+
+def inflate(data: bytes, limit: int, label: str) -> bytes:
+    """Decode one zlib/raw-deflate block of at most `limit` bytes, or raise."""
+    zlib_header = (
+        len(data) >= 2 and data[0] & 0x0F == 8 and data[0] >> 4 <= 7
+        and not data[1] & 0x20 and (data[0] << 8 | data[1]) % 31 == 0
+    )
+    for wbits in ((15, -15) if zlib_header else (-15,)):
+        inflater = zlib.decompressobj(wbits)
+        try:
+            out = inflater.decompress(data, limit + 1)
+        except zlib.error:
+            continue
+        if len(out) > limit or inflater.unconsumed_tail:
+            raise PkgError(f"{label} inflates past the block size")
+        if inflater.eof and not inflater.unused_data.strip(b"\x00"):
+            return out
+    raise PkgError(f"{label} is not valid compressed data")
+
+
 class Pfs:
     def __init__(self, reader, ekpfs: bytes | None = None, new_crypt: bool = False):
         self.name = getattr(reader, "name", "pfs")
@@ -421,6 +520,7 @@ class Pfs:
                 self.name,
             )
         self.reader = reader
+        self.pfsc: dict[int, PfscReader] = {}
         self.inodes = self._load_inodes()
         plausible = sum(1 for i in self.inodes if i.is_dir or i.is_file)
         if plausible * 2 < len(self.inodes):
@@ -558,13 +658,11 @@ class Pfs:
         """Read a byte range of a file without materialising the whole thing."""
         if inode.is_dir:
             raise PkgError(f"inode {inode.number} is a directory")
-        if inode.is_compressed:
-            raise PkgError(
-                f"{inode.number}: file is PFSC/compressed - not supported by pkg2elf.py"
-            )
         if offset >= inode.size:
             return b""
         length = min(length, inode.size - offset)
+        if inode.is_compressed:
+            return self.compressed(inode).read_at(offset, length)
         blocks = self.block_map(inode)
         if not blocks:
             return b"\x00" * length
@@ -582,6 +680,14 @@ class Pfs:
         if remaining > 0:
             out += b"\x00" * remaining
         return bytes(out)
+
+    def compressed(self, inode: Inode) -> PfscReader:
+        if inode.number not in self.pfsc:
+            if inode.size_compressed <= 0:
+                raise PkgError(f"inode {inode.number} is flagged compressed but stores no data")
+            stored = StoredData(self, inode, inode.size_compressed)
+            self.pfsc[inode.number] = PfscReader(stored, inode.size, f"inode {inode.number}")
+        return self.pfsc[inode.number]
 
     def read_file(self, inode: Inode) -> bytes:
         return self.read_range(inode, 0, inode.size)
@@ -800,8 +906,6 @@ class PfsFileView:
         self.inode = inode
         self.size = inode.size
         self.name = "inner-pfs"
-        if inode.is_compressed:
-            raise PkgError("inner PFS image is PFSC/compressed - not supported yet")
 
     def read_at(self, offset: int, length: int) -> bytes:
         if offset < 0 or length < 0 or offset + length > self.size:

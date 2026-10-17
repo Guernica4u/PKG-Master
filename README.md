@@ -22,7 +22,7 @@ pkgmaster convert game.pkg --to elf -o eboot.elf
 | PS5 outer PFS → inner `pfs_image.dat` | works |
 | SELF → standard ELF | works (unencrypted/uncompressed segments) |
 | Extract package files to a folder | works |
-| Compressed file data (PFSC) | not implemented — reported, never silently wrong |
+| Compressed file data (PFSC, zlib/deflate blocks) | works — corrupt streams are refused, never padded |
 | Retail package decryption | **not possible and not attempted** (see below) |
 
 ## Install
@@ -157,17 +157,16 @@ targets are mostly additive:
 1. `param.sfo` → JSON, and `param.json` formatting.
 2. `icon0.png` / DDS image passthrough and conversion.
 3. `snd0.at9` → WAV.
-4. PFSC (block-compressed) file and image decompression — the main gap for
-   real-world packages.
-5. Folder/ISO export of a whole PFS image.
-6. PS5 SELF stage-2 payload handling beyond fake-self modules.
+4. Folder/ISO export of a whole PFS image.
+5. PS5 SELF stage-2 payload handling beyond fake-self modules.
 
 ## Verified vs not
 
 Be precise about what has been proven:
 
 * **Verified** with synthetic fixtures and the test suite: PS4 and PS5 container
-  parsing, all three PFS inode layouts, multi-block files, encrypted PFS
+  parsing, all three PFS inode layouts, multi-block files, PFSC-compressed files
+  (including a compressed PS5 `pfs_image.dat`), encrypted PFS
   round-trips (right key works, wrong key is detected), encrypted metadata
   entries, SELF→ELF reconstruction, and the full CLI surface. Converted ELFs
   were checked with GNU `readelf` and `file`.
@@ -175,13 +174,13 @@ Be precise about what has been proven:
   here and none can be decrypted without console keys. Field-level offsets come
   from the documented formats and were cross-checked against two independent
   working implementations.
-* **Not implemented**: PFSC-compressed file data, `license.dat` decryption for
+* **Not implemented**: `license.dat` decryption for
   retail key index 3, and delta-patch specific entries.
 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q      # 41 tests
+.venv/bin/python -m pytest -q      # 89 tests
 ```
 
 ## References
