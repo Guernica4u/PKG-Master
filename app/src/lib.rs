@@ -6,6 +6,7 @@
 //! loaded into memory), no console keys, and malformed or encrypted input fails
 //! loudly instead of producing a plausible but wrong file.
 
+pub mod anyps5;
 pub mod binary;
 pub mod convert;
 pub mod crypto;
