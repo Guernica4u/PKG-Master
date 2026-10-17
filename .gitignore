@@ -9,3 +9,5 @@ dist/
 *.ffpkg
 *.elf
 out/
+app/target/
+.claude/
