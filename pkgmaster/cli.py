@@ -284,8 +284,13 @@ def cmd_extract(args) -> int:
                 continue
             destination = os.path.join(out_root, _safe_relative(path))
             os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
-            with open(destination, "wb") as handle:
-                pfs.copy_file(inode, handle)
+            try:
+                with open(destination, "wb") as handle:
+                    pfs.copy_file(inode, handle)
+            except BaseException:
+                # A corrupt block mid-file must not leave a truncated file behind.
+                os.remove(destination)
+                raise
             written += 1
             if not args.quiet:
                 print(f"extracted {path} ({_fmt_size(inode.size)})")

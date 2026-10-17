@@ -14,11 +14,16 @@ signed-64    0x310    104-byte header + 17 x (32-byte sig + u64)
 The signed inode header is shorter than the unsigned one because ``blocks``
 ends the common header at offset 0x64; the unsigned layout simply keeps the
 same 100 bytes and follows it with plain pointers.
+
+Files whose inode has flag 0x1 set (or ``size != size_compressed``) store a
+PFSC block-compressed stream instead of raw bytes; :class:`PfscReader`
+decodes it one block at a time.
 """
 
 from __future__ import annotations
 
 import io
+import zlib
 from dataclasses import dataclass, field
 from typing import Iterator
 
@@ -32,7 +37,7 @@ from .binary import (
     u64le,
 )
 from .crypto import XTS_SECTOR_SIZE, XtsDecryptReader, pfs_gen_xts_key
-from .errors import CorruptImage, KeyRequired, PkgMasterError, TruncatedFile, UnsupportedFeature
+from .errors import CorruptImage, KeyRequired, PkgMasterError, TruncatedFile
 
 PFS_MAGIC = 20130315
 SUPERBLOCK_READ = 0x400
@@ -54,6 +59,10 @@ DIRENT_DOT = 4
 DIRENT_DOTDOT = 5
 
 CONTIGUOUS_MARKERS = frozenset({0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF})
+
+PFSC_MAGIC = b"PFSC"
+PFSC_HEADER_SIZE = 0x30
+PFSC_MAX_BLOCK = 0x100000
 
 MAX_INODE_BLOCKS = 1 << 20
 MAX_BLOCK_INDEX = 1 << 26
@@ -282,6 +291,184 @@ class FileHandle:
         return self.size
 
 
+class StoredData:
+    """Strict ``read_at`` over the bytes an inode stores on disk.
+
+    For a compressed inode this is the PFSC stream (``size_compressed`` bytes),
+    not the decoded file. Unlike :class:`FileHandle` it never clamps or pads:
+    a read past the stored length, or past the end of the block map, is
+    corruption.
+    """
+
+    def __init__(self, image: "PfsImage", inode: Inode, size: int) -> None:
+        self.image = image
+        self.size = size
+        self.name = f"inode {inode.number}"
+        self.blocks = image.block_map(inode)
+        if len(self.blocks) * image.header.block_size < size:
+            raise CorruptImage(
+                f"inode {inode.number}: stores {size} bytes but maps only "
+                f"{len(self.blocks)} block(s)"
+            )
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        if offset < 0 or length < 0 or offset + length > self.size:
+            raise CorruptImage(
+                f"{self.name}: need {length} bytes at 0x{offset:X} of a "
+                f"0x{self.size:X}-byte stored stream"
+            )
+        block_size = self.image.header.block_size
+        out = bytearray()
+        while len(out) < length:
+            index, skip = divmod(offset + len(out), block_size)
+            take = min(block_size - skip, length - len(out))
+            out += self.image.reader.read_at(self.blocks[index] * block_size + skip, take)
+        return bytes(out)
+
+    def __len__(self) -> int:
+        return self.size
+
+
+class PfscReader:
+    """Random access to a PFSC block-compressed file.
+
+    Layout (little-endian): magic ``PFSC`` @0x00, block size u32 @0x0C and
+    again as u64 @0x10, block-offset table offset u64 @0x18, data start u64
+    @0x20, decoded length u64 @0x28. The table holds ``nblocks + 1`` u64
+    offsets into the stream; block ``i`` occupies ``[t[i], t[i+1])``. A block
+    whose stored size equals the block size is raw, anything shorter is a
+    zlib (or raw deflate) stream. Every inconsistency raises
+    :class:`CorruptImage`; nothing is padded or guessed.
+
+    Only the two table entries a block needs are read, and one decoded block
+    is cached, so memory use is bounded by the block size.
+    """
+
+    def __init__(self, stored, size: int, name: str = "") -> None:
+        self.stored = stored
+        self.size = size
+        self.name = name or getattr(stored, "name", "pfsc")
+        stored_len = len(stored)
+        if stored_len < PFSC_HEADER_SIZE:
+            raise CorruptImage(f"{self.name}: PFSC header is truncated")
+        header = stored.read_at(0, PFSC_HEADER_SIZE)
+        if header[:4] != PFSC_MAGIC:
+            raise CorruptImage(
+                f"{self.name}: compressed file has no PFSC magic (got {header[:4]!r})"
+            )
+        block_size = u32le(header, 0x0C)
+        if block_size == 0 or block_size > PFSC_MAX_BLOCK or u64le(header, 0x10) != block_size:
+            raise CorruptImage(f"{self.name}: implausible PFSC block size 0x{block_size:X}")
+        table = u64le(header, 0x18)
+        data_start = u64le(header, 0x20)
+        data_length = u64le(header, 0x28)
+        if data_length != size:
+            raise CorruptImage(
+                f"{self.name}: PFSC header says {data_length} bytes, inode says {size}"
+            )
+        self.block_size = block_size
+        self.count = -(-size // block_size)
+        table_end = table + (self.count + 1) * 8
+        if table < PFSC_HEADER_SIZE or table_end > stored_len:
+            raise CorruptImage(
+                f"{self.name}: PFSC block table (0x{table:X}..0x{table_end:X}) runs "
+                f"past the 0x{stored_len:X}-byte stream"
+            )
+        if data_start < table_end or data_start > stored_len:
+            raise CorruptImage(f"{self.name}: PFSC data start 0x{data_start:X} is out of range")
+        self.table = table
+        self.data_start = data_start
+        self._cached: tuple[int, bytes] | None = None
+
+    def _block_extent(self, index: int) -> tuple[int, int]:
+        raw = self.stored.read_at(self.table + index * 8, 16)
+        start, end = u64le(raw, 0), u64le(raw, 8)
+        if not self.data_start <= start < end <= len(self.stored):
+            raise CorruptImage(
+                f"{self.name}: PFSC block {index} spans 0x{start:X}..0x{end:X}, "
+                f"outside the data area 0x{self.data_start:X}..0x{len(self.stored):X}"
+            )
+        if end - start > self.block_size:
+            raise CorruptImage(
+                f"{self.name}: PFSC block {index} stores {end - start} bytes, "
+                f"more than the 0x{self.block_size:X} block size"
+            )
+        return start, end
+
+    def block(self, index: int) -> bytes:
+        """Decoded bytes of block ``index`` (short only for the last block)."""
+        if self._cached is not None and self._cached[0] == index:
+            return self._cached[1]
+        if not 0 <= index < self.count:
+            raise CorruptImage(f"{self.name}: PFSC block {index} is out of range")
+        expected = min(self.block_size, self.size - index * self.block_size)
+        start, end = self._block_extent(index)
+        data = self.stored.read_at(start, end - start)
+        if len(data) == self.block_size:
+            decoded = data
+        else:
+            decoded = _inflate(data, self.block_size, f"{self.name}: PFSC block {index}")
+        # The final block may be padded out to the full block size; any other
+        # length means the stream does not describe this file.
+        if len(decoded) != expected and not (
+            index == self.count - 1 and len(decoded) == self.block_size
+        ):
+            raise CorruptImage(
+                f"{self.name}: PFSC block {index} decodes to {len(decoded)} bytes "
+                f"(expected {expected})"
+            )
+        decoded = decoded[:expected]
+        self._cached = (index, decoded)
+        return decoded
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        """Read decoded bytes, clamping at EOF like :class:`FileHandle`."""
+        if offset < 0 or length < 0:
+            raise TruncatedFile(f"{self.name}: negative read ({offset}, {length})")
+        length = max(0, min(length, self.size - offset))
+        out = bytearray()
+        while len(out) < length:
+            index, skip = divmod(offset + len(out), self.block_size)
+            out += self.block(index)[skip : skip + length - len(out)]
+        return bytes(out)
+
+    def __len__(self) -> int:
+        return self.size
+
+
+def _looks_like_zlib(data: bytes) -> bool:
+    if len(data) < 2:
+        return False
+    cmf, flg = data[0], data[1]
+    return cmf & 0x0F == 8 and cmf >> 4 <= 7 and not flg & 0x20 and (cmf << 8 | flg) % 31 == 0
+
+
+def _inflate(data: bytes, limit: int, label: str) -> bytes:
+    """Decode one zlib/raw-deflate block of at most ``limit`` bytes, or raise."""
+    if _looks_like_zlib(data):
+        attempts = (zlib.MAX_WBITS, -zlib.MAX_WBITS)
+    else:
+        attempts = (-zlib.MAX_WBITS,)
+    error = "not a deflate stream"
+    for wbits in attempts:
+        inflater = zlib.decompressobj(wbits)
+        try:
+            out = inflater.decompress(data, limit + 1)
+        except zlib.error as exc:
+            error = str(exc)
+            continue
+        if len(out) > limit or inflater.unconsumed_tail:
+            raise CorruptImage(f"{label} inflates past the 0x{limit:X} block size")
+        if not inflater.eof:
+            error = "stream is truncated"
+            continue
+        if inflater.unused_data.strip(b"\x00"):
+            error = "trailing bytes after the deflate stream"
+            continue
+        return out
+    raise CorruptImage(f"{label} is not valid compressed data ({error})")
+
+
 class PfsImage:
     """A parsed PFS image."""
 
@@ -312,6 +499,7 @@ class PfsImage:
 
         self.reader = reader
         self.inodes: list[Inode] = []
+        self._pfsc: dict[int, PfscReader] = {}
         self._load_inode_table()
         self._validate_inodes()
         self.root = self._resolve_root()
@@ -569,18 +757,28 @@ class PfsImage:
     def file_reader(self, handle: FileHandle) -> FileHandle:
         return handle
 
+    def compressed_reader(self, inode: Inode) -> PfscReader:
+        """The (cached) PFSC decoder for a compressed file inode."""
+        reader = self._pfsc.get(inode.number)
+        if reader is None:
+            if inode.size_compressed <= 0:
+                raise CorruptImage(
+                    f"inode {inode.number} is flagged compressed but stores no data"
+                )
+            stored = StoredData(self, inode, inode.size_compressed)
+            reader = PfscReader(stored, inode.size, f"inode {inode.number}")
+            self._pfsc[inode.number] = reader
+        return reader
+
     def read_file_range(self, inode: Inode, offset: int, length: int) -> bytes:
         h = self.header
         if inode.is_dir:
             raise CorruptImage(f"inode {inode.number} is a directory")
-        if inode.is_compressed:
-            raise UnsupportedFeature(
-                f"{inode.number}: file is PFSC/compressed; compressed file data is "
-                "not implemented yet"
-            )
         if offset >= inode.size:
             return b""
         length = min(length, inode.size - offset)
+        if inode.is_compressed:
+            return self.compressed_reader(inode).read_at(offset, length)
         blocks = self.block_map(inode)
         if not blocks:
             return b"\x00" * length
@@ -601,10 +799,6 @@ class PfsImage:
         return bytes(out)
 
     def read_file(self, inode: Inode) -> bytes:
-        if inode.is_compressed:
-            raise UnsupportedFeature(
-                f"inode {inode.number} is compressed; PFSC file data is not implemented yet"
-            )
         return self.read_file_range(inode, 0, inode.size)
 
     def copy_file(
@@ -615,10 +809,6 @@ class PfsImage:
         chunk_size: int = 1 << 20,
         progress=None,
     ) -> int:
-        if inode.is_compressed:
-            raise UnsupportedFeature(
-                f"inode {inode.number} is compressed; PFSC file data is not implemented yet"
-            )
         written = 0
         while written < inode.size:
             take = min(chunk_size, inode.size - written)

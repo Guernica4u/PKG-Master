@@ -6,7 +6,7 @@ import pytest
 
 from pkgmaster.binary import Reader
 from pkgmaster.crypto import compute_keys, compute_keys_sha3
-from pkgmaster.errors import CorruptImage, UnsupportedFeature
+from pkgmaster.errors import CorruptImage
 from pkgmaster.pfs import PfsImage
 
 from pkgmaster import synth as b
@@ -102,12 +102,12 @@ def test_bad_magic_is_rejected():
         open_image(b"\x00" * 0x1000)
 
 
-def test_compressed_file_is_rejected_not_silently_wrong():
+def test_compressed_flag_without_pfsc_stream_is_rejected():
     image = bytearray(b.build_pfs({"a.bin": b"A" * 0x1000}))
     # Mark the first file inode (index 2) compressed.
     inode_size = 0xA8
     offset = 0x10000 + 2 * inode_size
     image[offset + 4] |= 0x1
     pfs = open_image(bytes(image))
-    with pytest.raises(UnsupportedFeature):
+    with pytest.raises(CorruptImage):
         pfs.read_file(pfs.resolve("a.bin"))
