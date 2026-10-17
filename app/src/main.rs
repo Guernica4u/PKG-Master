@@ -382,6 +382,45 @@ impl App {
         self.game.lock().map(|g| g.is_some()).unwrap_or(false)
     }
 
+    /// Runs shadPKG's `extract` on the open package (or one the user picks)
+    /// into a chosen folder, with no console window.
+    fn run_shadpkg(&mut self, ctx: &egui::Context) {
+        let Some(exe) = find_shadpkg().or_else(|| {
+            rfd::FileDialog::new()
+                .set_title("Locate shadpkg.exe")
+                .add_filter("shadpkg", &["exe"])
+                .pick_file()
+        }) else {
+            return;
+        };
+        let open_pkg = self
+            .path
+            .clone()
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pkg")));
+        let pkg = match open_pkg {
+            Some(p) => p,
+            None => {
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("Package to extract with shadPKG")
+                    .add_filter("PS4/PS5 package", &PACKAGE_EXTS);
+                if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
+                    dialog = dialog.set_directory(dir);
+                }
+                let Some(p) = dialog.pick_file() else { return };
+                p
+            }
+        };
+        let Some(out) = rfd::FileDialog::new()
+            .set_title("shadPKG output folder")
+            .set_directory(pkg.parent().unwrap_or(Path::new(".")))
+            .pick_folder()
+        else {
+            return;
+        };
+        self.status = Status::Info(format!("Running shadPKG on {}…", file_label(&pkg)));
+        self.spawn_job(ctx, move |progress| shadpkg_extract(&exe, &pkg, &out, progress));
+    }
+
     fn handle_messages(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
@@ -473,6 +512,94 @@ impl App {
 
 fn file_label(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
+}
+
+const SHADPKG_FALLBACK: &str = r"C:\Documents 2.0\Vibecoding\PS5 PKG master\shad\shadpkg.exe";
+
+/// Looks for shadpkg.exe: `PKGMASTER_SHADPKG`, then next to (or in a `shad`
+/// folder beside) this exe or any of its parent folders, then the known path.
+fn find_shadpkg() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("PKGMASTER_SHADPKG").map(PathBuf::from) {
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let exe = std::env::current_exe().ok()?;
+    for dir in exe.ancestors().skip(1) {
+        for candidate in [dir.join("shadpkg.exe"), dir.join("shad").join("shadpkg.exe")] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    Some(PathBuf::from(SHADPKG_FALLBACK)).filter(|p| p.is_file())
+}
+
+fn shadpkg_extract(exe: &Path, pkg: &Path, out: &Path, progress: &dyn Fn(u64, u64, &str)) -> Result<String, Error> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new(exe);
+    cmd.arg("extract")
+        .arg(pkg)
+        .arg(out)
+        // shadPKG writes its log into the working directory.
+        .current_dir(out)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn()?;
+
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let err_reader = thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+
+    // Show each stdout line (shadPKG redraws progress with '\r') as it arrives.
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = stdout.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            if b == b'\n' || b == b'\r' {
+                let line = String::from_utf8_lossy(&current).trim().to_string();
+                current.clear();
+                if !line.is_empty() {
+                    progress(0, 0, &line);
+                    lines.push(line);
+                }
+            } else {
+                current.push(b);
+            }
+        }
+    }
+    let tail = String::from_utf8_lossy(&current).trim().to_string();
+    if !tail.is_empty() {
+        lines.push(tail);
+    }
+
+    let status = child.wait()?;
+    let err_text = err_reader.join().unwrap_or_default();
+    let last: Vec<&str> = lines.iter().rev().take(3).rev().map(String::as_str).collect();
+    if status.success() {
+        Ok(format!("shadPKG extracted {} to {}.\n{}", file_label(pkg), out.display(), last.join("\n")))
+    } else {
+        let detail = if err_text.trim().is_empty() { last.join("\n") } else { err_text.trim().to_string() };
+        Err(Error::Conversion(format!("shadPKG failed ({status}):\n{detail}")))
+    }
 }
 
 fn describe_error(e: &Error) -> String {
@@ -592,6 +719,13 @@ impl eframe::App for App {
                     if let Some(p) = self.path.clone() {
                         self.start_load(ctx, p);
                     }
+                }
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Run shadPKG…"))
+                    .on_hover_text("Extract a .pkg with shadpkg.exe (uses the open package, or asks for one)")
+                    .clicked()
+                {
+                    self.run_shadpkg(ctx);
                 }
             });
             ui.separator();
