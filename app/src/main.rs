@@ -20,6 +20,7 @@ use pkgmaster::binary::fmt_size;
 use pkgmaster::convert::{
     convert_to_elf, default_output_name, extract_all, load, Input, Loaded,
 };
+use pkgmaster::history::{ago, History};
 use pkgmaster::Error;
 
 const PACKAGE_EXTS: [&str; 1] = ["pkg"];
@@ -88,8 +89,24 @@ struct App {
     log: Vec<String>,
     /// The launched game, while it runs.
     game: Arc<Mutex<Option<Child>>>,
-    /// Several .pkg files found in an opened folder; the user picks one.
-    pkg_choices: Option<Vec<PathBuf>>,
+    /// The listing of an opened folder that is not itself a game.
+    browse: Option<Vec<BrowseRow>>,
+    /// Everything the app has written, for the History panel.
+    history: Arc<Mutex<History>>,
+    show_history: bool,
+    /// A revert waiting for confirmation: (id, target, had a backup).
+    revert_confirm: Option<(u64, PathBuf, bool)>,
+    clear_confirm: bool,
+}
+
+#[derive(Clone)]
+struct BrowseRow {
+    path: PathBuf,
+    name: String,
+    is_dir: bool,
+    size: u64,
+    /// A file the app can load (.pkg or an executable).
+    openable: bool,
 }
 
 impl App {
@@ -110,7 +127,11 @@ impl App {
             run_dir: None,
             log: Vec::new(),
             game: Arc::new(Mutex::new(None)),
-            pkg_choices: None,
+            browse: None,
+            history: Arc::new(Mutex::new(History::load(&settings_path().with_file_name("history.tsv")))),
+            show_history: false,
+            revert_confirm: None,
+            clear_confirm: false,
         }
     }
 
@@ -120,22 +141,39 @@ impl App {
     }
 
     fn start_load(&mut self, ctx: &egui::Context, path: PathBuf) {
-        // A folder with no eboot but with .pkg files in it: open the package
-        // instead of failing (or ask which one when there are several).
+        self.open(ctx, path, true);
+    }
+
+    /// Open a file or folder. A folder that holds a game (eboot) loads as a
+    /// game. Otherwise, with `auto`, a lone .pkg is opened and a lone
+    /// subfolder is stepped into; anything else is listed like the file view.
+    /// Back and Refresh pass `auto = false` so they show the folder itself.
+    fn open(&mut self, ctx: &egui::Context, path: PathBuf, auto: bool) {
         let mut path = path;
-        let pkgs = pkgs_in_folder(&path);
-        match pkgs.len() {
-            0 => {}
-            1 => path = pkgs.into_iter().next().unwrap(),
-            _ => {
-                self.status = Status::Info(format!("{} has several .pkg files; pick one.", file_label(&path)));
-                self.loaded = None;
-                self.path = Some(path);
-                self.pkg_choices = Some(pkgs);
-                return;
+        while path.is_dir() && !has_eboot(&path) {
+            let pkgs = pkgs_in_folder(&path);
+            if auto && pkgs.len() == 1 {
+                path = pkgs.into_iter().next().unwrap();
+                break;
             }
+            let subdirs = subfolders(&path);
+            if auto && pkgs.is_empty() && subdirs.len() == 1 {
+                path = subdirs.into_iter().next().unwrap();
+                continue;
+            }
+            let rows = browse_rows(&path);
+            let (dirs, files) = (rows.iter().filter(|r| r.is_dir).count(), rows.iter().filter(|r| !r.is_dir).count());
+            self.status = Status::Info(format!(
+                "{}: {dirs} folder(s), {files} file(s). Click a folder to open it, or a .pkg / eboot to load it.",
+                file_label(&path)
+            ));
+            self.loaded = None;
+            self.selected = None;
+            self.path = Some(path);
+            self.browse = Some(rows);
+            return;
         }
-        self.pkg_choices = None;
+        self.browse = None;
         self.busy = true;
         self.loaded = None;
         self.selected = None;
@@ -185,8 +223,9 @@ impl App {
         }
         let Some(out) = dialog.save_file() else { return };
         self.status = Status::Info("Converting…".into());
+        let (hist, action) = (self.history.clone(), format!("Converted {source_name} to ELF"));
         self.spawn_job(ctx, move |progress| {
-            let r = convert_to_elf(&input, inner.as_deref(), &out, progress)?;
+            let r = tracked(&hist, &action, &out, || convert_to_elf(&input, inner.as_deref(), &out, progress))?;
             let mut msg = format!(
                 "Saved {} ({}) from {}: {} / {}, entry 0x{:X}.",
                 file_label(&r.output),
@@ -219,8 +258,9 @@ impl App {
             .unwrap_or_else(|| "package".into());
         let out = dir.join(stem);
         self.status = Status::Info("Extracting…".into());
+        let (hist, action) = (self.history.clone(), format!("Extracted {}", out.display()));
         self.spawn_job(ctx, move |progress| {
-            let n = extract_all(&pfs, &out, progress)?;
+            let n = tracked(&hist, &action, &out, || extract_all(&pfs, &out, progress))?;
             Ok(format!("Extracted {n} file(s) to {}.", out.display()))
         });
     }
@@ -290,6 +330,7 @@ impl App {
                 return;
             }
         };
+        let hist = self.history.clone();
         self.log.clear();
         self.run_dir = None;
         self.busy = true;
@@ -305,7 +346,10 @@ impl App {
                 let _ = tx.send(Msg::Log(line.to_string()));
                 ctx.request_repaint();
             };
-            let result = run_relinker(&root, &release, &out, &progress, &log).map(|r| r.out_dir);
+            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let result = tracked(&hist, &format!("AnyPS5 run folder for {name}"), &out, || {
+                run_relinker(&root, &release, &out, &progress, &log).map(|r| r.out_dir)
+            });
             let _ = tx.send(Msg::Relinked(result));
             ctx.request_repaint();
         });
@@ -396,8 +440,17 @@ impl App {
         else {
             return;
         };
+        // Each package gets its own folder, so the change can be reverted cleanly.
+        let stem = pkg.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "package".into());
+        let out = out.join(stem);
+        let (hist, action) = (self.history.clone(), format!("shadPKG extracted {}", file_label(&pkg)));
         self.status = Status::Info(format!("Running shadPKG on {}…", file_label(&pkg)));
-        self.spawn_job(ctx, move |progress| shadpkg_extract(&exe, &pkg, &out, progress));
+        self.spawn_job(ctx, move |progress| {
+            tracked(&hist, &action, &out, || {
+                std::fs::create_dir_all(&out)?;
+                shadpkg_extract(&exe, &pkg, &out, progress)
+            })
+        });
     }
 
     fn handle_messages(&mut self) {
@@ -478,6 +531,140 @@ impl App {
         }
     }
 
+    /// The History side panel and its Revert / Clear confirmations.
+    fn history_ui(&mut self, ctx: &egui::Context) {
+        if self.show_history {
+            let (mut revert, mut clear, mut show, mut close) = (None, false, None, false);
+            egui::SidePanel::right("history").resizable(true).default_width(360.0).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("History");
+                    close = ui.small_button("Close").clicked();
+                });
+                ui.weak("Everything PKG Master wrote. Revert deletes it and puts back whatever was there before.");
+                ui.separator();
+                let Ok(h) = self.history.try_lock() else {
+                    ui.weak("Busy…");
+                    return;
+                };
+                if h.changes.is_empty() {
+                    ui.weak("Nothing yet.");
+                }
+                egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(ui.available_height() - 36.0).show(
+                    ui,
+                    |ui| {
+                        for c in h.changes.iter().rev() {
+                            ui.group(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.strong(&c.action);
+                                    ui.weak(ago(c.time));
+                                });
+                                ui.label(RichText::new(c.target.display().to_string()).monospace().size(11.0));
+                                if c.backup.is_some() {
+                                    ui.weak("Replaced something that was already there (kept a backup).");
+                                }
+                                ui.horizontal(|ui| {
+                                    if c.reverted {
+                                        ui.weak("Reverted");
+                                    } else {
+                                        if ui.add_enabled(!self.busy, egui::Button::new("Revert")).clicked() {
+                                            revert = Some((c.id, c.target.clone(), c.backup.is_some()));
+                                        }
+                                        if ui.button("Show in Explorer").clicked() {
+                                            show = Some(c.target.clone());
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                    },
+                );
+                clear = ui
+                    .add_enabled(!self.busy && !h.changes.is_empty(), egui::Button::new("Clear history…"))
+                    .on_hover_text("Forget everything listed here and delete the backups. Your files stay as they are.")
+                    .clicked();
+            });
+            if close {
+                self.show_history = false;
+            }
+            if revert.is_some() {
+                self.revert_confirm = revert;
+            }
+            if clear {
+                self.clear_confirm = true;
+            }
+            if let Some(p) = show {
+                reveal(&p);
+            }
+        }
+
+        if let Some((id, target, had_backup)) = self.revert_confirm.clone() {
+            let mut decision = None;
+            egui::Window::new("Revert this change?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_max_width(460.0);
+                    ui.label(format!("This deletes {}", target.display()));
+                    if had_backup {
+                        ui.label("and puts back the version that was there before.");
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Revert").clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            decision = Some(false);
+                        }
+                    });
+                });
+            match decision {
+                Some(true) => {
+                    self.revert_confirm = None;
+                    let hist = self.history.clone();
+                    self.status = Status::Info("Reverting…".into());
+                    self.spawn_job(ctx, move |_| hist.lock().unwrap_or_else(|e| e.into_inner()).revert(id));
+                }
+                Some(false) => self.revert_confirm = None,
+                None => {}
+            }
+        }
+
+        if self.clear_confirm {
+            let mut decision = None;
+            egui::Window::new("Clear history?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_max_width(460.0);
+                    ui.label("This forgets every change and deletes the backups, so nothing listed can be reverted afterwards.");
+                    ui.label("Your files stay exactly as they are now.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Clear").clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            decision = Some(false);
+                        }
+                    });
+                });
+            match decision {
+                Some(true) => {
+                    self.clear_confirm = false;
+                    let hist = self.history.clone();
+                    self.spawn_job(ctx, move |_| {
+                        hist.lock().unwrap_or_else(|e| e.into_inner()).clear()?;
+                        Ok("History cleared and backups deleted.".into())
+                    });
+                }
+                Some(false) => self.clear_confirm = false,
+                None => {}
+            }
+        }
+    }
+
     fn pick_folder(&mut self, ctx: &egui::Context) {
         let mut dialog = rfd::FileDialog::new().set_title("Open a decrypted game folder (the one holding eboot.bin)");
         if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
@@ -489,10 +676,69 @@ impl App {
     }
 }
 
+fn has_eboot(dir: &Path) -> bool {
+    ["eboot.bin", "eboot.elf"].iter().any(|e| dir.join(e).is_file())
+}
+
+fn subfolders(dir: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect())
+        .unwrap_or_default();
+    dirs.sort();
+    dirs
+}
+
+/// A folder's contents for the listing: folders first, then files.
+fn browse_rows(dir: &Path) -> Vec<BrowseRow> {
+    let mut rows: Vec<BrowseRow> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| {
+                    let path = e.path();
+                    let is_dir = path.is_dir();
+                    let ext = path.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+                    BrowseRow {
+                        name: e.file_name().to_string_lossy().into_owned(),
+                        size: if is_dir { 0 } else { e.metadata().map(|m| m.len()).unwrap_or(0) },
+                        openable: !is_dir && (PACKAGE_EXTS.contains(&ext.as_str()) || BINARY_EXTS.contains(&ext.as_str())),
+                        is_dir,
+                        path,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    rows.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    rows
+}
+
+/// Run `op`, which writes `target`, and record it in the history. An
+/// existing target is backed up first; if `op` fails, nothing changes.
+fn tracked<T>(
+    hist: &Arc<Mutex<History>>,
+    action: &str,
+    target: &Path,
+    op: impl FnOnce() -> Result<T, Error>,
+) -> Result<T, Error> {
+    let pending = hist.lock().unwrap_or_else(|e| e.into_inner()).begin(action, target)?;
+    let result = op();
+    hist.lock().unwrap_or_else(|e| e.into_inner()).finish(pending, result.is_ok())?;
+    result
+}
+
+/// Show a file or folder in File Explorer (its folder, if it is gone).
+fn reveal(p: &Path) {
+    let _ = if p.exists() {
+        std::process::Command::new("explorer").arg(format!("/select,{}", p.display())).spawn()
+    } else {
+        std::process::Command::new("explorer").arg(p.parent().unwrap_or(p)).spawn()
+    };
+}
+
 /// The `.pkg` files directly inside `dir`, when `dir` is a folder without an
 /// eboot (so it is not a decrypted game folder). Empty otherwise.
 fn pkgs_in_folder(dir: &Path) -> Vec<PathBuf> {
-    if !dir.is_dir() || ["eboot.bin", "eboot.elf"].iter().any(|e| dir.join(e).is_file()) {
+    if !dir.is_dir() || has_eboot(dir) {
         return Vec::new();
     }
     let mut pkgs: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -684,7 +930,8 @@ impl eframe::App for App {
             });
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // The toolbar spans the full width, above the History panel.
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Open file…").size(16.0))).clicked() {
@@ -700,14 +947,47 @@ impl eframe::App for App {
                 {
                     self.run_shadpkg(ctx);
                 }
-                match &self.path {
-                    Some(p) => ui.label(RichText::new(p.display().to_string()).monospace()),
-                    None => ui.weak("No file open"),
-                };
+                ui.separator();
+                let parent = self.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf);
+                if ui
+                    .add_enabled(!self.busy && parent.is_some(), egui::Button::new(RichText::new("Back").size(16.0)))
+                    .on_hover_text("Go up one folder")
+                    .clicked()
+                {
+                    if let Some(p) = parent {
+                        self.open(ctx, p, false);
+                    }
+                }
+                if ui
+                    .add_enabled(!self.busy && self.path.is_some(), egui::Button::new(RichText::new("Refresh").size(16.0)))
+                    .on_hover_text("Reload what's open")
+                    .clicked()
+                {
+                    if let Some(p) = self.path.clone() {
+                        self.open(ctx, p, false);
+                    }
+                }
+                if ui
+                    .add(egui::SelectableLabel::new(self.show_history, RichText::new("History").size(16.0)))
+                    .on_hover_text("Everything PKG Master wrote, with Revert")
+                    .clicked()
+                {
+                    self.show_history = !self.show_history;
+                }
                 if self.busy {
                     ui.spinner();
                 }
             });
+            match &self.path {
+                Some(p) => ui.label(RichText::new(p.display().to_string()).monospace()),
+                None => ui.weak("No file open"),
+            };
+            ui.add_space(4.0);
+        });
+
+        self.history_ui(ctx);
+
+        egui::CentralPanel::default().show(ctx, |ui| {
 
             // The passcode row only appears for an encrypted package.
             if self.loaded.as_ref().is_some_and(|l| l.key_problem.is_some()) {
@@ -730,12 +1010,28 @@ impl eframe::App for App {
             }
             ui.separator();
 
-            if let Some(choices) = self.pkg_choices.clone() {
-                ui.label("This folder has several .pkg files. Which one?");
-                for p in choices {
-                    if ui.add_enabled(!self.busy, egui::Button::new(file_label(&p))).clicked() {
-                        self.start_load(ctx, p);
+            if let Some(rows) = self.browse.clone() {
+                if rows.is_empty() {
+                    ui.weak("This folder is empty.");
+                    return;
+                }
+                let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+                let mut clicked = None;
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
+                    for r in &rows[range] {
+                        ui.horizontal(|ui| {
+                            let size = if r.is_dir { "folder".to_string() } else { fmt_size(r.size) };
+                            ui.label(RichText::new(format!("{size:>10}")).monospace().weak());
+                            let name = if r.is_dir { format!("{}/", r.name) } else { r.name.clone() };
+                            let enabled = !self.busy && (r.is_dir || r.openable);
+                            if ui.add_enabled(enabled, egui::SelectableLabel::new(false, RichText::new(name).monospace())).clicked() {
+                                clicked = Some(r.path.clone());
+                            }
+                        });
                     }
+                });
+                if let Some(p) = clicked {
+                    self.start_load(ctx, p);
                 }
                 return;
             }
