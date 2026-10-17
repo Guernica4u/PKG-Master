@@ -190,3 +190,48 @@ def test_ps5_package_conversion(tmp_path):
         out.read_bytes()[p.p_offset : p.p_offset + p.p_filesz] == CODE
         for p in info.load_segments()
     )
+
+
+@pytest.mark.parametrize("ps5", [False, True])
+def test_extract_and_convert_compressed_eboot(tmp_path, ps5):
+    eboot = b.compressed_tree()["eboot.bin"]
+    assert isinstance(eboot, b.Compressed)
+    path = tmp_path / "pfsc.pkg"
+    path.write_bytes(b.build_sample(ps5=ps5, compressed=True))
+
+    listing = run("list", str(path), "--json")
+    assert listing.returncode == 0, listing.stderr
+    assert '"compressed": true' in listing.stdout
+
+    out = tmp_path / "out"
+    result = run("extract", str(path), "-o", str(out))
+    assert result.returncode == 0, result.stderr
+    assert (out / "eboot.bin").read_bytes() == eboot.data
+
+    plain = tmp_path / "plain.sprx"
+    plain.write_bytes(eboot.data)
+    expected, produced = tmp_path / "expected.elf", tmp_path / "eboot.elf"
+    assert run("convert", str(plain), "--to", "elf", "-o", str(expected)).returncode == 0
+    result = run("convert", str(path), "--to", "elf", "-o", str(produced))
+    assert result.returncode == 0, result.stderr
+    assert produced.read_bytes() == expected.read_bytes()
+
+
+def test_corrupt_compressed_eboot_fails_without_output(tmp_path):
+    eboot = b.compressed_tree()["eboot.bin"]
+    stored = bytearray(eboot.stored)
+    stored[len(stored) // 2] ^= 0xFF  # inside a compressed block
+    tree = {"eboot.bin": b.Compressed(stored=bytes(stored), size=eboot.size)}
+    path = tmp_path / "bad.pkg"
+    path.write_bytes(b.build_pkg(b.build_pfs(tree)))
+
+    out = tmp_path / "out"
+    result = run("extract", str(path), "-o", str(out))
+    assert result.returncode == 2, result.stderr
+    assert "PFSC" in result.stderr
+    assert not (out / "eboot.bin").exists()
+
+    elf = tmp_path / "bad.elf"
+    result = run("convert", str(path), "--to", "elf", "-o", str(elf), "--path", "eboot.bin")
+    assert result.returncode == 2, result.stderr
+    assert not elf.exists()

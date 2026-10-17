@@ -37,12 +37,13 @@ the user's go-ahead), or copy the files.
 ```bash
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"      # needs cryptography; pytest for tests
-.venv/bin/python -m pytest -q          # expect: 41 passed
+.venv/bin/python -m pytest -q          # expect: 89 passed
 
 # no real samples exist; generate structurally valid synthetic ones
 .venv/bin/python -m pkgmaster.synth demo.pkg
 .venv/bin/python -m pkgmaster.synth enc.pkg --encrypted   # AES-XTS PFS
 .venv/bin/python -m pkgmaster.synth demo.pkg --ps5        # PS5 FIH image
+.venv/bin/python -m pkgmaster.synth demo.pkg --compressed # PFSC eboot.bin
 
 .venv/bin/pkgmaster info demo.pkg
 .venv/bin/pkgmaster convert demo.pkg --to elf -o eboot.elf
@@ -53,7 +54,7 @@ file eboot.elf && readelf -h eboot.elf       # independent sanity check
 .venv/bin/python pkg2elf.py demo.pkg --info
 ```
 
-Last verified state: 41/41 tests pass; installed console script produces ELFs
+Last verified state: 89/89 tests pass; installed console script produces ELFs
 that GNU `readelf`/`file` accept (ELF64, LSB, FreeBSD OS/ABI, 56-byte phdrs,
 correct entry point) for plaintext PS4, encrypted PS4, and PS5 packages.
 
@@ -179,6 +180,31 @@ entry_size i32, name`, padded to an 8-byte boundary; `entry_size == 0`
 terminates. Types: 2 file, 3 dir, 4 dot, 5 dotdot. The superroot's directory
 contains `uroot`, which is the content tree.
 
+### PFSC compressed files
+
+A compressed inode stores `size_compressed` bytes through its normal block map;
+those bytes are a PFSC stream that decodes to `size` bytes (little-endian):
+
+| Offset | Field |
+| --- | --- |
+| `0x00` | magic `PFSC` |
+| `0x04` / `0x08` | unknown u32 (`0`) / unknown u32 (`6`) |
+| `0x0C` / `0x10` | block size u32 / block size again as u64 (`0x10000` typical; must match) |
+| `0x18` | offset of the block-offset table (u64, `0x400` typical) |
+| `0x20` | data start (u64) |
+| `0x28` | decoded length (u64; must equal the inode `size`) |
+
+The table holds `ceil(size / block_size) + 1` u64 offsets into the stream;
+block `i` is `[t[i], t[i+1])`. Stored size `== block_size` means the block is
+raw; shorter means zlib (raw deflate is also accepted). Every block decodes to
+exactly `block_size` except the last, which may be short or padded to a full
+block. `PfscReader` reads two table entries per block and caches one decoded
+block, so memory stays bounded. Any bad offset, oversize block, inflate error,
+trailing junk or wrong decoded length raises `CorruptImage`.
+
+The field layout follows LibOrbisPkg's `PFSCHdr`; it has not been checked
+against a real compressed package (none are available here).
+
 ### XTS encryption
 
 - Sector size `0x1000`; the **first `block_size // 0x1000` sectors are plaintext**
@@ -229,9 +255,6 @@ encrypted or compressed — do not emit a best-effort file.
 
 ## 7. Not implemented (and honest about it)
 
-- **PFSC (block-compressed) file data.** `pfs.py` raises `UnsupportedFeature`
-  with the inode number rather than emitting garbage. This is the single
-  biggest real-world gap: many homebrew/backup packages are compressed.
 - **PS5 outer-PFS compression** and the trailing SI install segment (ignored).
 - **Retail packages**: undecryptable without console key material. Deliberately
   unsupported; no keys are bundled anywhere in this codebase.
@@ -240,8 +263,8 @@ encrypted or compressed — do not emit a best-effort file.
 
 ## 8. Suggested next steps
 
-1. PFSC decompression (unblocks most real packages; the format is a block table
-   plus zlib blocks).
+1. Test PFSC against a real compressed fake-PKG; the reader is built from the
+   documented layout and synthetic fixtures only.
 2. `param.sfo` → JSON (unencrypted, present in every package, immediately makes
    `info` much more useful).
 3. More converter targets via the `CONVERTERS` registry in `convert.py`:

@@ -10,6 +10,7 @@ CLI against.
 from __future__ import annotations
 
 import struct
+import zlib
 
 from pkgmaster.crypto import compute_keys_sha3, pfs_gen_xts_key, xts_crypt_sector
 from pkgmaster.elf import parse_elf
@@ -29,6 +30,69 @@ CONTIG_MARKER_64 = 0xFFFFFFFFFFFFFFFF
 
 
 # --------------------------------------------------------------------------
+# PFSC
+
+
+PFSC_TABLE_OFFSET = 0x400
+
+
+def build_pfsc(
+    data: bytes,
+    *,
+    block_size: int = PFS_BLOCK,
+    raw_blocks: frozenset[int] | set[int] = frozenset(),
+    level: int = 6,
+    zlib_header: bool = True,
+) -> bytes:
+    """Encode ``data`` as a PFSC block-compressed stream.
+
+    Each ``block_size`` chunk is deflated on its own; a block listed in
+    ``raw_blocks``, or one that does not shrink, is stored raw and padded to
+    the full block size (which is how readers tell the two apart).
+    ``zlib_header=False`` emits raw deflate instead of zlib framing.
+    """
+    count = -(-len(data) // block_size)
+    table_size = (count + 1) * 8
+    data_start = _align(PFSC_TABLE_OFFSET + table_size, 0x10)
+
+    offsets = [data_start]
+    body = bytearray()
+    for index in range(count):
+        chunk = data[index * block_size : (index + 1) * block_size]
+        if zlib_header:
+            packed = zlib.compress(chunk, level)
+        else:
+            deflater = zlib.compressobj(level, zlib.DEFLATED, -zlib.MAX_WBITS)
+            packed = deflater.compress(chunk) + deflater.flush()
+        if index in raw_blocks or len(packed) >= block_size:
+            packed = chunk + b"\x00" * (block_size - len(chunk))
+        body += packed
+        offsets.append(data_start + len(body))
+
+    header = bytearray(data_start)
+    header[0:4] = b"PFSC"
+    struct.pack_into("<II", header, 0x04, 0, 6)
+    struct.pack_into("<IQQQQ", header, 0x0C, block_size, block_size,
+                     PFSC_TABLE_OFFSET, data_start, len(data))
+    struct.pack_into(f"<{count + 1}Q", header, PFSC_TABLE_OFFSET, *offsets)
+    return bytes(header) + bytes(body)
+
+
+class Compressed:
+    """A tree value for :func:`build_pfs`: store this file PFSC-compressed.
+
+    ``stored`` overrides the encoded stream (tests use it to plant corrupt
+    tables or blocks); ``size`` is the decoded length the inode declares.
+    """
+
+    def __init__(self, data: bytes = b"", *, stored: bytes | None = None,
+                 size: int | None = None, **pfsc_options) -> None:
+        self.data = data
+        self.stored = stored if stored is not None else build_pfsc(data, **pfsc_options)
+        self.size = len(data) if size is None else size
+
+
+# --------------------------------------------------------------------------
 # PFS
 
 
@@ -39,7 +103,9 @@ class _Node:
         self.parent = parent
         self.is_dir = is_dir
         self.children: list[int] = []
-        self.data = b""
+        self.data = b""  # bytes as stored (the PFSC stream when compressed)
+        self.size = 0
+        self.compressed = False
 
 
 def _flatten(tree: dict) -> tuple[list[_Node], int]:
@@ -56,7 +122,13 @@ def _flatten(tree: dict) -> tuple[list[_Node], int]:
                 add(value, number)
             else:
                 node = _Node(number, name, parent, False)
-                node.data = value
+                if isinstance(value, Compressed):
+                    node.data = value.stored
+                    node.size = value.size
+                    node.compressed = True
+                else:
+                    node.data = value
+                    node.size = len(value)
                 nodes.append(node)
                 nodes[parent].children.append(number)
 
@@ -202,8 +274,8 @@ def build_pfs(
             inode_blobs += _inode_record(
                 mode=0x8000 | 0x16D,
                 nlink=1,
-                flags=0,
-                size=len(node.data),
+                flags=0x1 if node.compressed else 0,
+                size=node.size,
                 size_compressed=len(node.data),
                 blocks=blocks,
                 direct=direct,
@@ -399,10 +471,14 @@ def build_pkg(pfs_bytes: bytes, **kwargs) -> bytes:
     return build_container(pfs_bytes=pfs_bytes, **kwargs)
 
 
-def build_ps5(inner_tree: dict, **kwargs) -> bytes:
-    """Build a PS5 ``\\x7FFIH`` image with a plaintext outer PFS."""
+def build_ps5(inner_tree: dict, *, compress_inner: bool = False, **kwargs) -> bytes:
+    """Build a PS5 ``\\x7FFIH`` image with a plaintext outer PFS.
+
+    ``compress_inner`` stores ``pfs_image.dat`` PFSC-compressed.
+    """
     inner = build_pfs(inner_tree, version=2)
-    outer = build_pfs({"pfs_image.dat": inner}, version=2)
+    stored = Compressed(inner) if compress_inner else inner
+    outer = build_pfs({"pfs_image.dat": stored}, version=2)
     cnt = build_container(**kwargs)
 
     fih_size = 0x10000
@@ -571,12 +647,31 @@ DEFAULT_TREE = {
 # demo package
 
 
-def build_sample(*, ps5: bool = False, encrypted: bool = False) -> bytes:
+def compressed_tree() -> dict:
+    """:data:`DEFAULT_TREE` with a multi-block, PFSC-compressed ``eboot.bin``.
+
+    The eboot spans several PFSC blocks, ends in a partial block, and has one
+    incompressible block that the encoder stores raw.
+    """
+    import random
+
+    noise = random.Random(0x5053).randbytes(PFS_BLOCK)
+    code = b"\x90\x48\x89\xe5" * (PFS_BLOCK // 4) + noise + b"\xc3" * 0x1234
+    eboot = build_self(build_elf([code, b"DATA" * 0x3000]))
+    tree = dict(DEFAULT_TREE)
+    tree["eboot.bin"] = Compressed(eboot)
+    return tree
+
+
+def build_sample(
+    *, ps5: bool = False, encrypted: bool = False, compressed: bool = False
+) -> bytes:
     """Build a complete demo package whose ``eboot.bin`` is a SELF-wrapped ELF."""
+    tree = compressed_tree() if compressed else DEFAULT_TREE
     if ps5:
-        return build_ps5(DEFAULT_TREE)
+        return build_ps5(tree)
     ekpfs = compute_keys_sha3(CONTENT_ID, PASSCODE, 1) if encrypted else None
-    pfs = build_pfs(DEFAULT_TREE, encrypted=encrypted, ekpfs=ekpfs)
+    pfs = build_pfs(tree, encrypted=encrypted, ekpfs=ekpfs)
     return build_pkg(pfs)
 
 
@@ -593,9 +688,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--encrypted", action="store_true", help="AES-XTS encrypt the PFS image"
     )
+    parser.add_argument(
+        "--compressed", action="store_true", help="store eboot.bin PFSC-compressed"
+    )
     args = parser.parse_args(argv)
 
-    data = build_sample(ps5=args.ps5, encrypted=args.encrypted)
+    data = build_sample(ps5=args.ps5, encrypted=args.encrypted, compressed=args.compressed)
     with open(args.output, "wb") as handle:
         handle.write(data)
     print(f"wrote {args.output} ({len(data)} bytes)")
