@@ -5,6 +5,13 @@
 //!   pkgmaster-cli list    FILE [--passcode P]
 //!   pkgmaster-cli convert FILE OUT [--passcode P] [--path P]
 //!   pkgmaster-cli extract FILE DIR [--passcode P]
+//!   pkgmaster-cli export  FILE|FOLDER DIR [--passcode P]
+//!   pkgmaster-cli anyps5  FOLDER DIR [--anyps5 ANYPS5_DIR] [--relinker FILE]
+//!
+//! `export` lays a package or a decrypted game folder out for AnyPS5:
+//! source/eboot.elf, source/sce_module/*, app0/ and HOW-TO-RUN.txt. `anyps5`
+//! also runs the user's own AnyPS5 relinker (the folder given, or the one saved
+//! by the window) and lays out app.exe, libs/ and app0/ in DIR.
 //!
 //! Exit codes match the Python CLI: 0 ok, 2 bad file/usage, 3 key required or
 //! wrong, 4 recognised but unimplemented.
@@ -12,11 +19,12 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use pkgmaster::convert::{convert_to_elf, extract_all, load, Input};
+use pkgmaster::anyps5::{preflight, run_relinker, settings_path, Settings};
+use pkgmaster::convert::{convert_to_elf, export_anyps5, extract_all, load, Input, MODULE_DIR};
 use pkgmaster::Error;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: pkgmaster-cli info|list|convert|extract FILE [OUT] [--passcode P] [--path P]");
+    eprintln!("usage: pkgmaster-cli info|list|convert|extract|export|anyps5 FILE [OUT] [--passcode P] [--path P] [--anyps5 DIR] [--relinker FILE]");
     ExitCode::from(2)
 }
 
@@ -30,6 +38,8 @@ fn main() -> ExitCode {
     };
     let passcode = take_opt("--passcode").or_else(|| std::env::var("PKGMASTER_PASSCODE").ok());
     let inner = take_opt("--path");
+    let anyps5_dir = take_opt("--anyps5");
+    let relinker = take_opt("--relinker");
     if args.len() < 2 {
         return usage();
     }
@@ -77,6 +87,45 @@ fn main() -> ExitCode {
                 };
                 let n = extract_all(pfs, Path::new(out), &quiet)?;
                 println!("{n} file(s) written to {out}");
+            }
+            "export" => {
+                let out = args.get(2).ok_or_else(|| Error::Conversion("export needs a folder".into()))?;
+                let r = export_anyps5(&input, Path::new(out), &quiet)?;
+                println!("eboot     source/eboot.elf ({} / {})", r.eboot.type_name(), r.eboot.machine_name());
+                for m in &r.modules {
+                    println!("module    source/{MODULE_DIR}/{m}");
+                }
+                for (m, why) in &r.skipped {
+                    println!("skipped   {MODULE_DIR}/{m}: {why}");
+                }
+                println!("app0      {} file(s)", r.app0_files);
+                for w in &r.warnings {
+                    println!("warning: {w}");
+                }
+                println!("exported to {out}; see HOW-TO-RUN.txt");
+            }
+            "anyps5" => {
+                let out = args.get(2).ok_or_else(|| Error::Conversion("anyps5 needs a folder".into()))?;
+                let Input::Folder(root) = &input else {
+                    return Err(Error::Conversion("anyps5 needs a decrypted game folder".into()));
+                };
+                let mut settings = Settings::load(&settings_path());
+                if let Some(d) = anyps5_dir {
+                    settings = Settings { anyps5_dir: Some(d.into()), relinker: None };
+                }
+                if let Some(r) = relinker {
+                    settings.relinker = Some(r.into());
+                }
+                if settings.anyps5_dir.is_none() {
+                    return Err(Error::Conversion("pass --anyps5 with your AnyPS5 folder".into()));
+                }
+                let release = settings.release()?;
+                for w in preflight(root)?.warnings() {
+                    println!("warning: {w}");
+                }
+                let log = |line: &str| println!("{line}");
+                let r = run_relinker(root, &release, Path::new(out), &quiet, &log)?;
+                println!("ready in {}; start app.exe from that folder", r.out_dir.display());
             }
             _ => return Err(Error::Conversion(format!("unknown command {:?}", args[0]))),
         }

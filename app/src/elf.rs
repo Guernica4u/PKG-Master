@@ -33,7 +33,9 @@ pub struct ProgramHeader {
     pub index: usize,
     pub p_type: u32,
     pub p_offset: u64,
+    pub p_vaddr: u64,
     pub p_filesz: u64,
+    pub p_align: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -146,14 +148,18 @@ pub fn parse_elf(d: &[u8], off: usize) -> Result<ElfInfo> {
                     index: i,
                     p_type: u32le(d, b),
                     p_offset: u64le(d, b + 0x08),
+                    p_vaddr: u64le(d, b + 0x10),
                     p_filesz: u64le(d, b + 0x20),
+                    p_align: u64le(d, b + 0x30),
                 }
             } else {
                 ProgramHeader {
                     index: i,
                     p_type: u32le(d, b),
                     p_offset: u32le(d, b + 0x04) as u64,
+                    p_vaddr: u32le(d, b + 0x08) as u64,
                     p_filesz: u32le(d, b + 0x10) as u64,
+                    p_align: u32le(d, b + 0x1C) as u64,
                 }
             });
         }
@@ -307,6 +313,24 @@ pub fn to_elf(d: &[u8]) -> Result<Conversion> {
     }
     let info = parse_elf(&out, 0)?;
     Ok(Conversion { data: out, info, warnings, copied_segments: copied, zero_filled_segments: zero_filled })
+}
+
+/// Program headers that break `p_offset % p_align == p_vaddr % p_align`.
+/// Loaders that map segments page by page (AnyPS5's relinker among them)
+/// need this to hold. `to_elf` copies program headers verbatim and places
+/// each payload at its `p_offset`, so it holds in the output exactly when it
+/// held in the original ELF.
+pub fn alignment_problems(info: &ElfInfo) -> Vec<String> {
+    info.phdrs
+        .iter()
+        .filter(|p| p.p_align > 1 && p.p_offset % p.p_align != p.p_vaddr % p.p_align)
+        .map(|p| {
+            format!(
+                "program header #{} (0x{:X}): offset 0x{:X} and vaddr 0x{:X} differ modulo align 0x{:X}",
+                p.index, p.p_type, p.p_offset, p.p_vaddr, p.p_align
+            )
+        })
+        .collect()
 }
 
 fn locate_elf(d: &[u8], start: usize) -> Result<usize> {
