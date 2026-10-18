@@ -22,7 +22,7 @@ unzip it and run `pkgmaster-gui.exe`. Nothing to install.
 | **History** | Everything the app has written, with **Revert** and **Show in Explorer**. See [History](#history). |
 | **Convert to ELF…** | Turns the selected file (by default `eboot.bin`) from Sony's SELF format into a standard ELF64, which is the file type AnyPS5 needs. Saves into a new `<name>-elf` folder next to the game files by default. |
 | **Extract all files…** | Unpacks everything inside a `.pkg` into a normal folder. |
-| **Run in AnyPS5…** | For a decrypted PS5 game folder: converts the executables, runs your AnyPS5 relinker, and sets up a ready-to-run folder inside your AnyPS5 folder. **Launch** then starts it. |
+| **Run in AnyPS5…** | For a decrypted PS5 game folder: converts the executables, runs your AnyPS5 relinker, and sets up a ready-to-run folder inside your AnyPS5 folder. **Launch** then starts it, and **Copy log** copies everything it printed. Hidden for PS4 games, which AnyPS5 can't run. |
 | **Passcode** | Only shown for encrypted fake/debug packages. Usually 32 zeros. |
 
 **Right-click** any file in a list for **Convert to ELF**, **Show in
@@ -41,18 +41,22 @@ backups to free the space.
 ### AnyPS5
 
 [AnyPS5](https://github.com/boykopovar/AnyPS5) turns **PS5** games (title IDs
-starting with `PPSA`) into Windows programs. It isn't included, so download
-its release yourself:
+starting with `PPSA`) into Windows programs. It isn't included. The first time
+you press an AnyPS5 button, PKG Master explains how to get it, and its
+**Download for me** button fetches the official release from AnyPS5's GitHub
+page into an `AnyPS5` folder next to `pkgmaster-gui.exe` and sets it up.
+
+To set it up by hand instead:
 
 1. Unzip AnyPS5's `prx-windows-v….zip` (the folder with `libs/`) and put its
    `relinker….exe` in the same folder.
-2. In PKG Master, open your decrypted PS5 game folder and click
-   **AnyPS5 folder…** once to point at that folder. Any `.exe` with
+2. In PKG Master, click **AnyPS5 folder…** (or **Run in AnyPS5…**), then
+   **I have it, pick the folder…** and choose that folder. Any `.exe` with
    "relinker" in its name is found automatically.
 3. Click **Run in AnyPS5…**, then **Launch**.
 
-PS4 games (`CUSA…`) aren't supported by AnyPS5; the app warns you before
-starting. AnyPS5 is early software and only a few games work so far.
+PS4 games (`CUSA…`) aren't supported by AnyPS5, so the AnyPS5 buttons are
+hidden for them. AnyPS5 is early software and only a few games work so far.
 
 ### shadPKG
 

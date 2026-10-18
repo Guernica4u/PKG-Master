@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
 use pkgmaster::anyps5::{
-    find_libs, find_relinker, launch_command, preflight, run_relinker, settings_path, spawn_piped, stream_lines, Settings, APP_EXE,
+    find_libs, find_relinker, install_release, is_ps4_self, launch_command, preflight, run_relinker, settings_path, spawn_piped,
+    stream_lines, Settings, ANYPS5_RELEASES, APP_EXE,
 };
 use pkgmaster::binary::fmt_size;
 use pkgmaster::convert::{
@@ -32,7 +33,8 @@ fn main() -> eframe::Result {
             .with_title("PKG Master")
             .with_inner_size([760.0, 560.0])
             .with_min_inner_size([520.0, 400.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(window_icon()),
         ..Default::default()
     };
     // A file passed on the command line (or dropped onto the .exe) opens at start.
@@ -50,8 +52,19 @@ fn main() -> eframe::Result {
     )
 }
 
+/// The app icon for the title bar and taskbar.
+fn window_icon() -> egui::IconData {
+    let img = image::load_from_memory_with_format(include_bytes!("../assets/icon.png"), image::ImageFormat::Png)
+        .expect("the bundled icon is a PNG")
+        .to_rgba8();
+    egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() }
+}
+
 enum Msg {
-    Loaded(PathBuf, Result<Loaded, Error>),
+    /// A load finished; the flag says whether it is a PS4 game.
+    Loaded(PathBuf, Result<Loaded, Error>, bool),
+    /// "Download for me" finished: the AnyPS5 folder, or why not.
+    AnyPs5Installed(Result<PathBuf, Error>),
     Progress(u64, u64, String),
     Done(Result<String, Error>),
     Log(String),
@@ -108,6 +121,10 @@ struct App {
     shown_title: Option<String>,
     /// Run shadPKG was pressed but shadPKG.exe isn't installed.
     shadpkg_missing: bool,
+    /// An AnyPS5 button was pressed but AnyPS5 isn't set up.
+    anyps5_missing: bool,
+    /// The open game is a PS4 title, so the AnyPS5 buttons are hidden.
+    is_ps4: bool,
 }
 
 /// Something picked from a file's right-click menu.
@@ -158,6 +175,8 @@ impl App {
             icon_tex: None,
             shown_title: None,
             shadpkg_missing: false,
+            anyps5_missing: false,
+            is_ps4: false,
         }
     }
 
@@ -194,6 +213,7 @@ impl App {
                 file_label(&path)
             ));
             self.loaded = None;
+            self.is_ps4 = false;
             self.icon_tex = None;
             self.selected = None;
             self.path = Some(path);
@@ -203,6 +223,7 @@ impl App {
         self.browse = None;
         self.busy = true;
         self.loaded = None;
+        self.is_ps4 = false;
         self.icon_tex = None;
         self.selected = None;
         self.progress = None;
@@ -211,7 +232,8 @@ impl App {
         let (tx, ctx, passcode) = (self.tx.clone(), ctx.clone(), self.passcode());
         thread::spawn(move || {
             let result = load(&path, passcode.as_deref());
-            let _ = tx.send(Msg::Loaded(path, result));
+            let ps4 = result.as_ref().is_ok_and(looks_ps4);
+            let _ = tx.send(Msg::Loaded(path, result, ps4));
             ctx.request_repaint();
         });
     }
@@ -349,7 +371,8 @@ impl App {
 
     fn run_anyps5(&mut self) {
         let Some(Input::Folder(root)) = self.loaded.as_ref().and_then(|l| l.input.clone()) else { return };
-        if self.settings.release().is_err() && !self.pick_anyps5() {
+        if self.settings.release().is_err() {
+            self.anyps5_missing = true;
             return;
         }
         let pre = match preflight(&root) {
@@ -496,7 +519,7 @@ impl App {
     fn handle_messages(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Loaded(path, result) => {
+                Msg::Loaded(path, result, ps4) => {
                     self.busy = false;
                     if self.path.as_deref() != Some(path.as_path()) {
                         continue;
@@ -519,6 +542,7 @@ impl App {
                             self.selected = l.default_elf.clone();
                             self.loaded = Some(l);
                             self.icon_tex = None;
+                            self.is_ps4 = ps4;
                         }
                         Err(e) => self.status = Status::Err(describe_error(&e)),
                     }
@@ -538,6 +562,25 @@ impl App {
                             let msg = format!("Ready in {}. Press Launch to start {APP_EXE}.", dir.display());
                             self.run_dir = Some(dir);
                             Status::Ok(msg)
+                        }
+                        Err(e) => Status::Err(describe_error(&e)),
+                    };
+                }
+                Msg::AnyPs5Installed(result) => {
+                    self.busy = false;
+                    self.progress = None;
+                    self.status = match result {
+                        Ok(dir) => {
+                            self.settings.anyps5_dir = Some(dir.clone());
+                            self.settings.relinker = None;
+                            match self.settings.save(&settings_path()) {
+                                Ok(()) => Status::Ok(format!("AnyPS5 is set up in {}.", dir.display())),
+                                Err(e) => Status::Err(format!(
+                                    "AnyPS5 downloaded to {}, but the setting could not be saved: {}",
+                                    dir.display(),
+                                    describe_error(&e)
+                                )),
+                            }
                         }
                         Err(e) => Status::Err(describe_error(&e)),
                     };
@@ -657,6 +700,65 @@ impl App {
         }
         if close {
             self.shadpkg_missing = false;
+        }
+    }
+
+    /// Shown when an AnyPS5 button is pressed without AnyPS5 set up.
+    fn anyps5_missing_ui(&mut self, ctx: &egui::Context) {
+        if !self.anyps5_missing {
+            return;
+        }
+        let dest = anyps5_download_dir();
+        let (mut close, mut pick, mut download) = (false, false, false);
+        egui::Window::new("AnyPS5 isn't installed")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(500.0);
+                ui.label("Running PS5 games needs AnyPS5, which isn't included with PKG Master.");
+                ui.add_space(4.0);
+                ui.label("1. From AnyPS5's GitHub releases, download prx-windows-v….zip and relinker-v….exe:");
+                if ui.link(ANYPS5_RELEASES).clicked() {
+                    open_url(ANYPS5_RELEASES);
+                }
+                ui.add_space(4.0);
+                ui.label("2. Unzip prx-windows-v….zip (the folder with libs/ in it).");
+                ui.label("3. Drop relinker-v….exe into that folder.");
+                ui.label("4. Press \"I have it, pick the folder…\" and choose that folder.");
+                ui.add_space(8.0);
+                ui.label(RichText::new("Or let PKG Master do all of that:").strong());
+                ui.weak(format!("Downloads the official release (about 90 MB) into {}", dest.display()));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    download = ui.add_enabled(!self.busy, egui::Button::new("Download for me")).clicked();
+                    pick = ui.add_enabled(!self.busy, egui::Button::new("I have it, pick the folder…")).clicked();
+                    if ui.button("Open download page").clicked() {
+                        open_url(ANYPS5_RELEASES);
+                    }
+                    close = ui.button("Close").clicked();
+                });
+            });
+        if pick && self.pick_anyps5() {
+            close = true;
+        }
+        if download {
+            self.busy = true;
+            self.progress = Some((0, 0, String::new()));
+            self.status = Status::Info("Downloading AnyPS5 from its GitHub releases…".into());
+            let (tx, ctx) = (self.tx.clone(), ctx.clone());
+            thread::spawn(move || {
+                let progress = |done: u64, total: u64, item: &str| {
+                    let _ = tx.send(Msg::Progress(done, total, item.to_string()));
+                    ctx.request_repaint();
+                };
+                let _ = tx.send(Msg::AnyPs5Installed(install_release(&dest, &progress)));
+                ctx.request_repaint();
+            });
+            close = true;
+        }
+        if close {
+            self.anyps5_missing = false;
         }
     }
 
@@ -991,6 +1093,31 @@ fn find_shadpkg() -> Option<PathBuf> {
     None
 }
 
+/// Where "Download for me" puts AnyPS5: an `AnyPS5\` folder next to this app.
+fn anyps5_download_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("AnyPS5")))
+        .unwrap_or_else(|| PathBuf::from("AnyPS5"))
+}
+
+/// A PS4 game: a CUSA title ID, or, without a title ID, a PS4 package or a
+/// PS4 SELF executable. The title ID wins because some PS5 (PPSA) games
+/// ship a few PS4-format modules.
+fn looks_ps4(l: &Loaded) -> bool {
+    if let Some(id) = &l.info.title_id {
+        return id.to_uppercase().starts_with("CUSA");
+    }
+    if l.rows.iter().any(|(k, v)| k == "Format" && v.starts_with("PS4")) {
+        return true;
+    }
+    match &l.input {
+        Some(Input::Folder(root)) => preflight(root).is_ok_and(|p| p.ps4.is_some()),
+        Some(Input::Binary(p)) => is_ps4_self(p),
+        _ => false,
+    }
+}
+
 /// Open a web page in the default browser.
 fn open_url(url: &str) {
     let _ = std::process::Command::new("explorer").arg(url).spawn();
@@ -1145,6 +1272,10 @@ impl eframe::App for App {
                     if ui.small_button("Clear").clicked() {
                         self.log.clear();
                     }
+                    if ui.small_button("Copy log").on_hover_text("Copy every line to the clipboard").clicked() {
+                        ctx.copy_text(self.log.join("\n"));
+                        self.status = Status::Ok(format!("Copied {} log line(s).", self.log.len()));
+                    }
                 });
                 egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
                     for line in &self.log {
@@ -1212,6 +1343,7 @@ impl eframe::App for App {
         self.history_ui(ctx);
         self.delete_ui(ctx);
         self.shadpkg_missing_ui(ctx);
+        self.anyps5_missing_ui(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
 
@@ -1341,48 +1473,51 @@ impl eframe::App for App {
                     .on_hover_text("Unpacks everything inside the .pkg into a normal folder.")
                     .clicked();
             });
-            ui.horizontal(|ui| {
-                let running = self.game_running();
-                do_run = ui
-                    .add_enabled(
-                        ready && is_folder && !running,
-                        egui::Button::new(RichText::new("Run in AnyPS5…").size(15.0)),
-                    )
-                    .on_hover_text(
-                        "Converts the game's executables, runs your AnyPS5 relinker on them and lays out \
-                         app.exe, libs/ and app0/ inside your AnyPS5 folder.",
-                    )
-                    .on_disabled_hover_text("Needs a decrypted game folder (Open folder…).")
-                    .clicked();
-                let can_launch = !self.busy && !running && self.run_dir.is_some();
-                do_launch = ui.add_enabled(can_launch, egui::Button::new(RichText::new("Launch").size(15.0))).clicked();
-                if running {
-                    do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
-                }
-                match (self.settings.release(), &self.settings.anyps5_dir) {
-                    // Once set, the button is replaced by the path; click it to change.
-                    (Ok(r), Some(dir)) => {
-                        do_pick_anyps5 = ui
-                            .add_enabled(
-                                !self.busy,
-                                egui::Link::new(RichText::new(format!("AnyPS5: {}", dir.display())).monospace()),
-                            )
-                            .on_hover_text(format!(
-                                "Click to change.\nrelinker: {}\nlibs: {}",
-                                r.relinker.display(),
-                                r.libs.display()
-                            ))
-                            .clicked();
+            // AnyPS5 only runs PS5 games, so PS4 games get no AnyPS5 buttons.
+            if !self.is_ps4 {
+                ui.horizontal(|ui| {
+                    let running = self.game_running();
+                    do_run = ui
+                        .add_enabled(
+                            ready && is_folder && !running,
+                            egui::Button::new(RichText::new("Run in AnyPS5…").size(15.0)),
+                        )
+                        .on_hover_text(
+                            "Converts the game's executables, runs your AnyPS5 relinker on them and lays out \
+                             app.exe, libs/ and app0/ inside your AnyPS5 folder.",
+                        )
+                        .on_disabled_hover_text("Needs a decrypted game folder (Open folder…).")
+                        .clicked();
+                    let can_launch = !self.busy && !running && self.run_dir.is_some();
+                    do_launch = ui.add_enabled(can_launch, egui::Button::new(RichText::new("Launch").size(15.0))).clicked();
+                    if running {
+                        do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
                     }
-                    (Err(_), Some(_)) => {
-                        do_pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("AnyPS5 folder…")).clicked();
-                        ui.weak("AnyPS5 folder incomplete, pick it again");
+                    match (self.settings.release(), &self.settings.anyps5_dir) {
+                        // Once set, the button is replaced by the path; click it to change.
+                        (Ok(r), Some(dir)) => {
+                            do_pick_anyps5 = ui
+                                .add_enabled(
+                                    !self.busy,
+                                    egui::Link::new(RichText::new(format!("AnyPS5: {}", dir.display())).monospace()),
+                                )
+                                .on_hover_text(format!(
+                                    "Click to change.\nrelinker: {}\nlibs: {}",
+                                    r.relinker.display(),
+                                    r.libs.display()
+                                ))
+                                .clicked();
+                        }
+                        (Err(_), Some(_)) => {
+                            do_pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("AnyPS5 folder…")).clicked();
+                            ui.weak("AnyPS5 folder incomplete, pick it again");
+                        }
+                        _ => {
+                            do_pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("AnyPS5 folder…")).clicked();
+                        }
                     }
-                    _ => {
-                        do_pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("AnyPS5 folder…")).clicked();
-                    }
-                }
-            });
+                });
+            }
 
             if has_files && !loaded.files.is_empty() {
                 ui.add_space(8.0);
@@ -1442,7 +1577,12 @@ impl eframe::App for App {
                 self.extract(ctx);
             }
             if do_pick_anyps5 {
-                self.pick_anyps5();
+                // Not set up yet: explain where to get it first.
+                if self.settings.anyps5_dir.is_none() {
+                    self.anyps5_missing = true;
+                } else {
+                    self.pick_anyps5();
+                }
             }
             if do_run {
                 self.run_anyps5();
