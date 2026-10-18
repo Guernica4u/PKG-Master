@@ -12,8 +12,9 @@
 //! out/app0/...                      every original game file
 //! ```
 //!
-//! AnyPS5 is never downloaded, bundled or shipped by this app; the user points
-//! it at a release folder they got themselves.
+//! AnyPS5 is never bundled or shipped with this app; the user points it at a
+//! release folder they got themselves, or asks it to download the official
+//! release from AnyPS5's GitHub page.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -196,6 +197,65 @@ pub fn find_release(dir: &Path, relinker: Option<&Path>) -> Result<Release> {
     Ok(Release { relinker, libs })
 }
 
+/// AnyPS5's GitHub repository, where "Download for me" gets the release.
+pub const ANYPS5_REPO: &str = "boykopovar/AnyPS5";
+pub const ANYPS5_RELEASES: &str = "https://github.com/boykopovar/AnyPS5/releases";
+
+/// Only on the user's request: download the latest official AnyPS5 release
+/// (`prx-windows-v….zip` and `relinker-v….exe`) into `dest`, unpack it and
+/// put the relinker next to `libs/`. Returns the folder holding `libs/`.
+pub fn install_release(dest: &Path, progress: crate::convert::Progress) -> Result<PathBuf> {
+    use crate::download::{download, latest_release, unzip};
+
+    let release = latest_release(ANYPS5_REPO)?;
+    let pick = |prefix: &str, ext: &str| {
+        release
+            .assets
+            .iter()
+            .find(|a| {
+                let n = a.name.to_lowercase();
+                n.starts_with(prefix) && n.ends_with(ext)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                Error::Conversion(format!(
+                    "AnyPS5's latest release ({}) has no {prefix}…{ext} file; download it by hand from {ANYPS5_RELEASES}",
+                    release.tag
+                ))
+            })
+    };
+    let (zip_asset, relinker_asset) = (pick("prx-windows", ".zip")?, pick("relinker", ".exe")?);
+
+    fs::create_dir_all(dest)?;
+    let zip_path = dest.join(&zip_asset.name);
+    download(&zip_asset, &zip_path, progress)?;
+    let unpacked = unzip(&zip_path, dest, progress);
+    let _ = fs::remove_file(&zip_path);
+    unpacked?;
+
+    // The zip may hold libs/ directly or inside one top-level folder.
+    let home = if find_libs(dest).is_ok() {
+        dest.to_path_buf()
+    } else {
+        let subs: Vec<PathBuf> = fs::read_dir(dest)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && find_libs(p).is_ok())
+            .collect();
+        match subs.as_slice() {
+            [one] => one.clone(),
+            _ => return Err(Error::Conversion(format!("the AnyPS5 download has no libs/ folder (in {})", dest.display()))),
+        }
+    };
+    download(&relinker_asset, &home.join(&relinker_asset.name), progress)?;
+    Ok(home)
+}
+
+/// Whether `path` starts like a PS4 SELF.
+pub fn is_ps4_self(path: &Path) -> bool {
+    head4(path) == Some(PS4_SELF_MAGIC)
+}
+
 fn has_module_ext(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, e)| MODULE_EXTS.contains(&e.to_lowercase().as_str()))
 }
@@ -306,7 +366,10 @@ pub fn preflight(root: &Path) -> Result<Preflight> {
         .as_ref()
         .filter(|t| t.to_uppercase().starts_with("CUSA"))
         .map(|t| format!("title ID {t}"));
-    if ps4.is_none() {
+    // A PS5 game (it has param.json) can still ship PS4-format modules, so
+    // the executables are only checked when there is no param.json.
+    let has_param_json = sys.join("param.json").is_file();
+    if ps4.is_none() && !has_param_json {
         let mut candidates: Vec<(String, PathBuf)> =
             EBOOTS.iter().map(|e| (e.to_string(), root.join(e))).collect();
         for f in files_with_ext(&root.join(MODULE_DIR), &["prx"]) {
@@ -319,7 +382,7 @@ pub fn preflight(root: &Path) -> Result<Preflight> {
             .map(|(name, _)| format!("{name} is a PS4 SELF"));
     }
     let module_dirs = UNITY_MODULE_DIRS.iter().filter_map(|d| find_dir(root, d)).collect();
-    Ok(Preflight { title_id, ps4, has_param_json: sys.join("param.json").is_file(), module_dirs })
+    Ok(Preflight { title_id, ps4, has_param_json, module_dirs })
 }
 
 /// Arguments for the relinker, run from the output folder.
