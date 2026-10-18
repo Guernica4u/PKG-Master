@@ -1,8 +1,8 @@
 # PKG Master
 
-A small Windows app for PS4/PS5 game files **you dumped legally yourself**.
-It opens fake-signed and debug `.pkg` files and decrypted game folders, turns
-the game's executable into a standard ELF, unpacks packages, and can run a
+A minimal app for PS4/PS5 game files **you dumped legally yourself**.
+It supports decrypting ps4 games through ShadPKG and setups AnyPS5 for you, turns
+the game's executable (eboot.bin) into a standard .ELF file, unpacks packages, and can run a
 decrypted PS5 game through [AnyPS5](https://github.com/boykopovar/AnyPS5).
 
 **[⬇ Download the latest release](https://github.com/Guernica4u/PKG-Master/releases/latest)**:
