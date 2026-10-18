@@ -10,6 +10,7 @@ pub mod anyps5;
 pub mod binary;
 pub mod convert;
 pub mod crypto;
+pub mod download;
 pub mod elf;
 pub mod error;
 pub mod history;
