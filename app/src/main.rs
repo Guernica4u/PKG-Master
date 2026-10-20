@@ -5,6 +5,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -16,14 +17,15 @@ use std::time::Duration;
 use eframe::egui::{self, Color32, RichText};
 use pkgmaster::anyps5::{
     find_libs, find_relinker, install_release, is_ps4_self, launch_command, preflight, run_relinker, settings_path, spawn_piped,
-    stream_lines, Settings, ANYPS5_RELEASES, APP_EXE,
+    stream_lines, Settings, ANYPS5_RELEASES, ANYPS5_REPO, APP_EXE,
 };
 use pkgmaster::binary::fmt_size;
 use pkgmaster::convert::{
-    convert_to_elf, default_output_name, extract_all, load, Input, Loaded,
+    convert_to_elf, default_output_name, extract_all, load, ps3_game_dir, Input, Loaded,
 };
 use pkgmaster::download::{Release, CANCELLED};
 use pkgmaster::history::{ago, History};
+use pkgmaster::library::{Entry, Library};
 use pkgmaster::update;
 use pkgmaster::Error;
 
@@ -68,8 +70,11 @@ fn window_icon() -> egui::IconData {
 enum Msg {
     /// A load finished; the flag says whether it is a PS4 game.
     Loaded(PathBuf, Result<Loaded, Error>, bool),
-    /// "Download for me" finished: the AnyPS5 folder, or why not.
-    AnyPs5Installed(Result<PathBuf, Error>),
+    /// "Download for me" or an AnyPS5 update finished: the AnyPS5 folder
+    /// and release tag, or why not.
+    AnyPs5Installed(Result<(PathBuf, String), Error>),
+    /// A newer AnyPS5 release than the installed one (its tag).
+    AnyPs5UpdateFound(String),
     /// A newer PKG Master is on GitHub.
     UpdateFound(Release),
     /// "Update now" finished: the new program to start, or why not.
@@ -143,6 +148,20 @@ struct App {
     show_update: bool,
     /// When Copy log was last pressed (egui time), to show "Copied".
     copied_at: Option<f64>,
+    /// Starred games and games run in AnyPS5 or RPCS3.
+    library: Library,
+    /// Library icons uploaded to the GPU, by icon file (None: unreadable).
+    library_tex: HashMap<PathBuf, Option<egui::TextureHandle>>,
+    /// What was open before, for the Back button (newest last).
+    back_stack: Vec<PathBuf>,
+    /// The log panel is expanded (it folds away when another game opens).
+    log_open: bool,
+    /// Where the Run / Launch rows end (last frame), so the log never covers them.
+    actions_bottom: Option<f32>,
+    /// Run in RPCS3 was pressed but rpcs3.exe isn't set up.
+    rpcs3_missing: bool,
+    /// A newer AnyPS5 than the installed one (its tag).
+    anyps5_update: Option<String>,
 }
 
 /// Something picked from a file's right-click menu.
@@ -200,6 +219,13 @@ impl App {
             update: None,
             show_update: false,
             copied_at: None,
+            library: Library::load(&settings_path().with_file_name("library.json")),
+            library_tex: HashMap::new(),
+            back_stack: Vec::new(),
+            log_open: true,
+            actions_bottom: None,
+            rpcs3_missing: false,
+            anyps5_update: None,
         }
     }
 
@@ -217,6 +243,13 @@ impl App {
     /// subfolder is stepped into; anything else is listed like the file view.
     /// Back and Refresh pass `auto = false` so they show the folder itself.
     fn open(&mut self, ctx: &egui::Context, path: PathBuf, auto: bool) {
+        // Something new: remember what was open for Back, and fold the log away.
+        if let Some(prev) = self.path.clone().filter(|p| *p != path) {
+            if self.back_stack.last() != Some(&prev) {
+                self.back_stack.push(prev);
+            }
+            self.log_open = false;
+        }
         let mut path = path;
         while path.is_dir() && !has_eboot(&path) {
             let pkgs = pkgs_in_folder(&path);
@@ -446,7 +479,7 @@ impl App {
 
     fn launch(&mut self, ctx: &egui::Context) {
         let Some(dir) = self.run_dir.clone() else { return };
-        let mut child = match launch_command(&dir).and_then(spawn_piped) {
+        let child = match launch_command(&dir).and_then(spawn_piped) {
             Ok(c) => c,
             Err(e) => {
                 self.status = Status::Err(describe_error(&e));
@@ -454,6 +487,13 @@ impl App {
             }
         };
         self.log.push(format!("> {APP_EXE} (in {})", dir.display()));
+        self.watch_game(ctx, child, APP_EXE.to_string());
+    }
+
+    /// Stream a started game's output into the log, keep it for Stop, and
+    /// report when it exits.
+    fn watch_game(&mut self, ctx: &egui::Context, mut child: Child, name: String) {
+        self.log_open = true;
         let out = child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>);
         let err = child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>);
         for pipe in [out, err].into_iter().flatten() {
@@ -466,7 +506,7 @@ impl App {
             });
         }
         *self.game.lock().unwrap() = Some(child);
-        self.status = Status::Info(format!("{APP_EXE} is running."));
+        self.status = Status::Info(format!("{name} is running."));
         let (game, tx, ctx) = (self.game.clone(), self.tx.clone(), ctx.clone());
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(200));
@@ -474,14 +514,72 @@ impl App {
             let Some(child) = guard.as_mut() else { break };
             let msg = match child.try_wait() {
                 Ok(None) => continue,
-                Ok(Some(status)) => format!("{APP_EXE} exited ({status})."),
-                Err(e) => format!("Lost track of {APP_EXE}: {e}"),
+                Ok(Some(status)) => format!("{name} exited ({status})."),
+                Err(e) => format!("Lost track of {name}: {e}"),
             };
             *guard = None;
             let _ = tx.send(Msg::Exited(msg));
             ctx.request_repaint();
             break;
         });
+    }
+
+    /// Boot a dumped PS3 game in the user's own RPCS3, and keep it in the Library.
+    fn run_rpcs3(&mut self, ctx: &egui::Context, game: &Path) {
+        let Some(eboot) = ps3_game_dir(game).map(|d| d.join("USRDIR").join("EBOOT.BIN")) else {
+            self.status = Status::Err(format!("{} isn't a PS3 game folder (no PARAM.SFO and USRDIR/EBOOT.BIN)", game.display()));
+            return;
+        };
+        let Some(rpcs3) = find_rpcs3(&self.settings) else {
+            self.rpcs3_missing = true;
+            return;
+        };
+        let mut cmd = std::process::Command::new(&rpcs3);
+        cmd.arg("--no-gui").arg(&eboot);
+        if let Some(dir) = rpcs3.parent() {
+            cmd.current_dir(dir);
+        }
+        let child = match spawn_piped(cmd) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status = Status::Err(format!("Could not start RPCS3: {}", describe_error(&e)));
+                return;
+            }
+        };
+        self.log.push(format!("> rpcs3 --no-gui {}", eboot.display()));
+        if let Some(l) = self.loaded.as_ref().filter(|_| self.path.as_deref() == Some(game)) {
+            self.library.add(game, &l.info, None);
+            let _ = self.library.save();
+        }
+        self.watch_game(ctx, child, "RPCS3".to_string());
+    }
+
+    /// Start a Library game: a PS3 game boots in RPCS3, a game with an AnyPS5
+    /// run folder starts its app.exe, and anything else just opens.
+    fn boot(&mut self, ctx: &egui::Context, e: &Entry) {
+        if !e.path.exists() {
+            self.status = Status::Err(format!("{} isn't there any more.", e.path.display()));
+            return;
+        }
+        self.start_load(ctx, e.path.clone());
+        if self.game_running() {
+            return;
+        }
+        if e.is_ps3() || ps3_game_dir(&e.path).is_some() {
+            self.run_rpcs3(ctx, &e.path);
+        } else if let Some(dir) = e.run_dir.clone().filter(|d| d.join(APP_EXE).is_file()) {
+            self.run_dir = Some(dir);
+            self.launch(ctx);
+        }
+    }
+
+    /// Go back to what was open before.
+    fn go_back(&mut self, ctx: &egui::Context) {
+        if let Some(p) = self.back_stack.pop() {
+            // Clearing the current path first keeps it off the Back list.
+            self.path = None;
+            self.open(ctx, p, false);
+        }
     }
 
     fn stop_game(&mut self) {
@@ -551,7 +649,7 @@ impl App {
                         Ok(l) => {
                             self.status = match &l.key_problem {
                                 Some(Error::KeyRequired(_)) => {
-                                    Status::Err("This package is encrypted. Enter its 32-character passcode and press Unlock.".into())
+                                    Status::Err("This package is encrypted.".into())
                                 }
                                 Some(e) => Status::Err(format!("That passcode didn't work: {e}")),
                                 None => match &l.input {
@@ -566,8 +664,6 @@ impl App {
                             self.loaded = Some(l);
                             self.icon_tex = None;
                             self.is_ps4 = ps4;
-                            self.settings.remember(&path);
-                            let _ = self.settings.save(&settings_path());
                         }
                         Err(e) => self.status = Status::Err(describe_error(&e)),
                     }
@@ -584,13 +680,19 @@ impl App {
                     self.progress = None;
                     self.status = match result {
                         Ok(dir) => {
-                            let msg = format!("Ready in {}. Press Launch to start {APP_EXE}.", dir.display());
+                            let msg = format!("Ready in {}. Press Launch to start {APP_EXE}. Added to your Library.", dir.display());
+                            // Running a game in AnyPS5 puts it in the Library, with its run folder.
+                            if let (Some(game), Some(l)) = (self.path.clone(), self.loaded.as_ref()) {
+                                self.library.add(&game, &l.info, Some(dir.clone()));
+                                let _ = self.library.save();
+                            }
                             self.run_dir = Some(dir);
                             Status::Ok(msg)
                         }
                         Err(e) => Status::Err(describe_error(&e)),
                     };
                 }
+                Msg::AnyPs5UpdateFound(tag) => self.anyps5_update = Some(tag),
                 Msg::UpdateFound(release) => {
                     // Shown once per start, unless the user skipped this version.
                     self.show_update = self.settings.skip_version.as_deref() != Some(release.tag.as_str());
@@ -615,9 +717,11 @@ impl App {
                     self.cancellable = false;
                     self.progress = None;
                     self.status = match result {
-                        Ok(dir) => {
+                        Ok((dir, tag)) => {
                             self.settings.anyps5_dir = Some(dir.clone());
                             self.settings.relinker = None;
+                            self.settings.anyps5_version = Some(tag);
+                            self.anyps5_update = None;
                             match self.settings.save(&settings_path()) {
                                 Ok(()) => Status::Ok(format!("AnyPS5 is set up in {}.", dir.display())),
                                 Err(e) => Status::Err(format!(
@@ -748,27 +852,111 @@ impl App {
         }
     }
 
-    /// The Recent menu's entries; returns the one picked. Entries that no
-    /// longer exist are greyed out.
-    fn recent_menu(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
-        let mut picked = None;
-        for p in &self.settings.recent {
-            let resp = ui
-                .add_enabled(p.exists(), egui::Button::new(file_label(p)))
-                .on_hover_text(p.display().to_string())
-                .on_disabled_hover_text(format!("{} (not found any more)", p.display()));
-            if resp.clicked() {
-                picked = Some(p.clone());
-                ui.close_menu();
-            }
+    /// An icon from the Library's icon cache, uploaded once.
+    fn library_icon(&mut self, ctx: &egui::Context, icon: &Path) -> Option<egui::TextureHandle> {
+        self.library_tex
+            .entry(icon.to_path_buf())
+            .or_insert_with(|| {
+                let img = image::open(icon).ok()?.to_rgba8();
+                let size = [img.width() as usize, img.height() as usize];
+                let image = egui::ColorImage::from_rgba_unmultiplied(size, &img);
+                Some(ctx.load_texture(icon.display().to_string(), image, egui::TextureOptions::LINEAR))
+            })
+            .clone()
+    }
+
+    /// The Library dropdown: the saved games as tiles, three across, two
+    /// rows visible at a time. Returns what was picked.
+    fn library_menu(&mut self, ui: &mut egui::Ui) -> Option<LibraryAction> {
+        const TILE: egui::Vec2 = egui::vec2(150.0, 150.0);
+        const ICON: f32 = 100.0;
+        let mut action = None;
+        // A fixed-size rectangle: three tiles across, two rows, scroll for more.
+        let size = egui::vec2(3.0 * TILE.x + 2.0 * 8.0 + 16.0, 2.0 * TILE.y + 8.0);
+        ui.set_min_size(size);
+        ui.set_max_width(size.x);
+        if self.library.entries.is_empty() {
+            ui.add_space(8.0);
+            ui.label("Your Library is empty.");
+            ui.weak("Press the star next to a game's title to save it here. Games you run in AnyPS5 or RPCS3 are added for you.");
+            ui.add_space(8.0);
+            return None;
         }
-        ui.separator();
-        if ui.button("Clear list").clicked() {
-            self.settings.recent.clear();
-            let _ = self.settings.save(&settings_path());
-            ui.close_menu();
+        let entries = self.library.entries.clone();
+        egui::ScrollArea::vertical().max_height(size.y).auto_shrink([false, false]).show(ui, |ui| {
+            egui::Grid::new("library-grid").spacing([8.0, 8.0]).show(ui, |ui| {
+                for (i, e) in entries.iter().enumerate() {
+                    let tex = e.icon.as_ref().and_then(|p| self.library_icon(ui.ctx(), p));
+                    let (rect, resp) = ui.allocate_exact_size(TILE, egui::Sense::click());
+                    let fill = ui.style().interact(&resp).weak_bg_fill;
+                    ui.painter().rect_filled(rect, 6.0, fill);
+                    let icon_rect = egui::Rect::from_center_size(
+                        rect.center_top() + egui::vec2(0.0, 8.0 + ICON / 2.0),
+                        egui::vec2(ICON, ICON),
+                    );
+                    match &tex {
+                        Some(t) => egui::Image::new(t).paint_at(ui, icon_rect),
+                        None => {
+                            ui.painter().rect_filled(icon_rect, 6.0, ui.visuals().faint_bg_color);
+                        }
+                    }
+                    let missing = !e.path.exists();
+                    let color = if missing { ui.visuals().weak_text_color() } else { ui.visuals().text_color() };
+                    let galley = ui.painter().layout(e.title.clone(), egui::FontId::proportional(13.0), color, TILE.x - 12.0);
+                    let text_pos = egui::pos2(rect.center().x - galley.size().x / 2.0, icon_rect.bottom() + 6.0);
+                    ui.painter().with_clip_rect(rect).galley(text_pos, galley, color);
+                    let what = if e.is_ps3() {
+                        "Click to play in RPCS3"
+                    } else if e.run_dir.as_ref().is_some_and(|d| d.join(APP_EXE).is_file()) {
+                        "Click to play (AnyPS5)"
+                    } else {
+                        "Click to open"
+                    };
+                    let resp = resp.on_hover_text(if missing {
+                        format!("{}\nNot found any more", e.path.display())
+                    } else {
+                        format!("{what}\n{}", e.path.display())
+                    });
+                    if resp.clicked() && !missing {
+                        action = Some(LibraryAction::Boot(e.clone()));
+                        ui.close_menu();
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.add_enabled(!missing, egui::Button::new("Open game files")).clicked() {
+                            action = Some(LibraryAction::Open(e.path.clone()));
+                            ui.close_menu();
+                        }
+                        if ui.button("Show in Explorer").clicked() {
+                            reveal(&e.path);
+                            ui.close_menu();
+                        }
+                        if ui.button("Remove from Library").clicked() {
+                            action = Some(LibraryAction::Remove(e.path.clone()));
+                            ui.close_menu();
+                        }
+                    });
+                    if i % 3 == 2 {
+                        ui.end_row();
+                    }
+                }
+            });
+        });
+        action
+    }
+
+    /// Star or unstar the open game.
+    fn toggle_library(&mut self) {
+        let (Some(path), Some(l)) = (self.path.clone(), self.loaded.as_ref()) else { return };
+        if self.library.contains(&path) {
+            self.library.remove(&path);
+            self.status = Status::Info("Removed from your Library.".into());
+        } else {
+            self.library.add(&path, &l.info, None);
+            self.status = Status::Ok("Saved to your Library.".into());
         }
-        picked
+        if let Err(e) = self.library.save() {
+            self.status = Status::Err(format!("The Library could not be saved: {}", describe_error(&e)));
+        }
     }
 
     /// Run a download on a worker thread with progress and a Cancel button;
@@ -799,12 +987,84 @@ impl App {
             return;
         }
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        let anyps5 = self.settings.installed_anyps5_version();
         thread::spawn(move || {
             if let Ok(Some(release)) = update::check() {
                 let _ = tx.send(Msg::UpdateFound(release));
                 ctx.request_repaint();
             }
+            // AnyPS5 changes often; say when a newer one is out.
+            if let Some(installed) = anyps5 {
+                if let Ok(r) = pkgmaster::download::latest_release(ANYPS5_REPO) {
+                    if update::is_newer(&r.tag, &installed) {
+                        let _ = tx.send(Msg::AnyPs5UpdateFound(r.tag));
+                        ctx.request_repaint();
+                    }
+                }
+            }
         });
+    }
+
+    /// Download the newer AnyPS5 into a new folder beside the current one,
+    /// then switch to it. The old folder (and its run folders) stays.
+    fn update_anyps5(&mut self, ctx: &egui::Context) {
+        let Some(tag) = self.anyps5_update.clone() else { return };
+        let base = self
+            .settings
+            .anyps5_dir
+            .as_ref()
+            .and_then(|d| d.parent())
+            .filter(|p| can_write(p))
+            .map(Path::to_path_buf)
+            .or_else(|| anyps5_download_dir().parent().map(Path::to_path_buf))
+            .unwrap_or_default();
+        let dest = base.join(format!("AnyPS5-{tag}"));
+        self.status = Status::Info(format!("Downloading AnyPS5 {tag}…"));
+        self.spawn_download(ctx, move |progress, cancel| Msg::AnyPs5Installed(install_release(&dest, progress, cancel)));
+    }
+
+    /// Shown when Run in RPCS3 is pressed without RPCS3 set up.
+    fn rpcs3_missing_ui(&mut self, ctx: &egui::Context) {
+        if !self.rpcs3_missing {
+            return;
+        }
+        let (mut close, mut pick) = (false, false);
+        egui::Window::new("RPCS3 isn't set up")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(480.0);
+                ui.label("Run in RPCS3 plays PS3 games with RPCS3, the PS3 emulator. It isn't included with PKG Master.");
+                ui.add_space(4.0);
+                ui.label("1. Download RPCS3 from its official site and unzip it:");
+                if ui.link(RPCS3_DOWNLOAD).clicked() {
+                    open_url(RPCS3_DOWNLOAD);
+                }
+                ui.label("2. Start it once and install the PS3 system software, as its quickstart guide explains.");
+                ui.label("3. Press \"I have it, pick rpcs3.exe…\" below.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    pick = ui.button("I have it, pick rpcs3.exe…").clicked();
+                    if ui.button("Open download page").clicked() {
+                        open_url(RPCS3_DOWNLOAD);
+                    }
+                    close = ui.button("Close").clicked();
+                });
+            });
+        if pick {
+            if let Some(file) = rfd::FileDialog::new().set_title("Pick rpcs3.exe").add_filter("Program", &["exe"]).pick_file() {
+                self.settings.rpcs3 = Some(file);
+                self.status = match self.settings.save(&settings_path()) {
+                    Ok(()) => Status::Ok("RPCS3 saved. Press Run in RPCS3 again.".into()),
+                    Err(e) => Status::Err(format!("RPCS3 set, but it could not be saved: {}", describe_error(&e))),
+                };
+                close = true;
+            }
+        }
+        if close {
+            self.rpcs3_missing = false;
+        }
     }
 
     /// "PKG Master vX is out", with Update now.
@@ -1102,8 +1362,9 @@ impl App {
     }
 }
 
+/// A folder that is itself a game: a PS4/PS5 dump (eboot) or a PS3 dump.
 fn has_eboot(dir: &Path) -> bool {
-    ["eboot.bin", "eboot.elf"].iter().any(|e| dir.join(e).is_file())
+    ["eboot.bin", "eboot.elf"].iter().any(|e| dir.join(e).is_file()) || ps3_game_dir(dir).is_some()
 }
 
 fn subfolders(dir: &Path) -> Vec<PathBuf> {
@@ -1248,6 +1509,25 @@ fn find_shadpkg() -> Option<PathBuf> {
         }
     }
     None
+}
+
+const RPCS3_DOWNLOAD: &str = "https://rpcs3.net/download";
+
+/// The user's rpcs3.exe: the one they picked, `PKGMASTER_RPCS3`, or an
+/// `rpcs3\rpcs3.exe` next to this app.
+fn find_rpcs3(settings: &Settings) -> Option<PathBuf> {
+    let beside_app = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("rpcs3").join("rpcs3.exe")));
+    [settings.rpcs3.clone(), std::env::var_os("PKGMASTER_RPCS3").map(PathBuf::from), beside_app]
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_file())
+}
+
+/// Something picked in the Library dropdown.
+enum LibraryAction {
+    Boot(Entry),
+    Open(PathBuf),
+    Remove(PathBuf),
 }
 
 /// Where "Download for me" puts AnyPS5: an `AnyPS5\` folder next to this
@@ -1398,27 +1678,29 @@ impl eframe::App for App {
             }
         }
 
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.add_space(6.0);
-            if let Some((done, total, item)) = &self.progress {
-                let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
-                ui.horizontal(|ui| {
-                    if self.cancellable && self.busy {
-                        if ui.button("Cancel").clicked() {
+        let status_top = egui::TopBottomPanel::bottom("status")
+            .show(ctx, |ui| {
+                ui.add_space(6.0);
+                if let Some((done, total, item)) = &self.progress {
+                    let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
+                    ui.horizontal(|ui| {
+                        if self.cancellable && self.busy && ui.button("Cancel").clicked() {
                             self.cancel.store(true, Ordering::Relaxed);
                         }
-                    }
-                    ui.add(egui::ProgressBar::new(frac).show_percentage().text(item.as_str()));
-                });
-            }
-            let (text, color) = match &self.status {
-                Status::Info(m) => (m.as_str(), ui.visuals().text_color()),
-                Status::Ok(m) => (m.as_str(), Color32::from_rgb(0x2E, 0xA0, 0x43)),
-                Status::Err(m) => (m.as_str(), Color32::from_rgb(0xD0, 0x3B, 0x3B)),
-            };
-            ui.label(RichText::new(text).color(color));
-            ui.add_space(6.0);
-        });
+                        ui.add(egui::ProgressBar::new(frac).show_percentage().text(item.as_str()));
+                    });
+                }
+                let (text, color) = match &self.status {
+                    Status::Info(m) => (m.as_str(), ui.visuals().text_color()),
+                    Status::Ok(m) => (m.as_str(), Color32::from_rgb(0x2E, 0xA0, 0x43)),
+                    Status::Err(m) => (m.as_str(), Color32::from_rgb(0xD0, 0x3B, 0x3B)),
+                };
+                ui.label(RichText::new(text).color(color));
+                ui.add_space(6.0);
+            })
+            .response
+            .rect
+            .top();
 
         if let Some((warnings, root, out)) = self.confirm.clone() {
             let mut decision = None;
@@ -1455,28 +1737,48 @@ impl eframe::App for App {
         }
 
         if !self.log.is_empty() {
-            egui::TopBottomPanel::bottom("log").resizable(true).default_height(160.0).show(ctx, |ui| {
+            // The log can be dragged taller, but never over the Run / Launch rows.
+            let room = match self.actions_bottom {
+                Some(bottom) => status_top - bottom - 6.0,
+                None => ctx.screen_rect().height() * 0.6,
+            };
+            let header = |ui: &mut egui::Ui, app: &mut App| {
                 ui.horizontal(|ui| {
-                    ui.strong("AnyPS5 log");
+                    ui.strong("Log");
+                    let toggle = if app.log_open { "Hide".to_string() } else { format!("Show ({} lines)", app.log.len()) };
+                    if ui.small_button(toggle).clicked() {
+                        app.log_open = !app.log_open;
+                    }
                     if ui.small_button("Clear").clicked() {
-                        self.log.clear();
+                        app.log.clear();
                     }
                     // The button says "Copied" for a moment; the status line is left alone.
-                    let now = ctx.input(|i| i.time);
-                    let copied = self.copied_at.is_some_and(|t| now - t < 1.5);
-                    let label = if copied { "Copied!" } else { "Copy log" };
-                    if ui.small_button(label).on_hover_text("Copy every line to the clipboard").clicked() {
-                        ctx.copy_text(self.log.join("\n"));
-                        self.copied_at = Some(now);
-                        ctx.request_repaint_after(Duration::from_millis(1600));
+                    let now = ui.ctx().input(|i| i.time);
+                    let copied = app.copied_at.is_some_and(|t| now - t < 1.5);
+                    if ui.small_button(if copied { "Copied!" } else { "Copy log" }).on_hover_text("Copy every line to the clipboard").clicked() {
+                        ui.ctx().copy_text(app.log.join("\n"));
+                        app.copied_at = Some(now);
+                        ui.ctx().request_repaint_after(Duration::from_millis(1600));
                     }
                 });
-                egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-                    for line in &self.log {
-                        ui.label(RichText::new(line).monospace().size(12.0));
-                    }
-                });
-            });
+            };
+            if self.log_open {
+                egui::TopBottomPanel::bottom("log")
+                    .resizable(true)
+                    .default_height(160.0_f32.min(room.max(60.0)))
+                    .min_height(60.0)
+                    .max_height(room.max(60.0))
+                    .show(ctx, |ui| {
+                        header(ui, self);
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+                            for line in &self.log {
+                                ui.label(RichText::new(line).monospace().size(12.0));
+                            }
+                        });
+                    });
+            } else {
+                egui::TopBottomPanel::bottom("log-folded").show(ctx, |ui| header(ui, self));
+            }
         }
 
         // The toolbar spans the full width, above the History panel.
@@ -1499,39 +1801,40 @@ impl eframe::App for App {
                 if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Open folder…").size(16.0))).clicked() {
                     self.pick_folder(ctx);
                 }
-                ui.add_enabled_ui(!self.busy && !self.settings.recent.is_empty(), |ui| {
-                    ui.menu_button(RichText::new("Recent").size(16.0), |ui| {
-                        if let Some(p) = self.recent_menu(ui) {
-                            self.start_load(ctx, p);
-                        }
-                    })
-                    .response
-                    .on_hover_text("Games you opened lately")
-                    .on_disabled_hover_text("Games you open show up here");
+                let mut picked = None;
+                ui.add_enabled_ui(!self.busy, |ui| {
+                    ui.menu_button(RichText::new(format!("{ICON_LIBRARY} Library")).size(16.0), |ui| {
+                        picked = self.library_menu(ui);
+                    });
                 });
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new(RichText::new("Run shadPKG (PS4)…").size(16.0)))
-                    .on_hover_text("Run on PS4 pkg files")
-                    .clicked()
+                match picked {
+                    Some(LibraryAction::Boot(e)) => self.boot(ctx, &e),
+                    Some(LibraryAction::Open(p)) => self.start_load(ctx, p),
+                    Some(LibraryAction::Remove(p)) => {
+                        self.library.remove(&p);
+                        let _ = self.library.save();
+                    }
+                    None => {}
+                }
+                // shadPKG only makes sense for an open PS4 package.
+                let ps4_pkg = self.is_ps4 && self.path.as_deref().is_some_and(is_pkg_path);
+                if ps4_pkg
+                    && ui
+                        .add_enabled(!self.busy, egui::Button::new(RichText::new("Run shadPKG (PS4)…").size(16.0)))
+                        .on_hover_text("Extract this PS4 package with your shadPKG")
+                        .clicked()
                 {
                     self.run_shadpkg(ctx);
                 }
                 ui.separator();
-                let parent = self.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf);
                 if ui
-                    .add_enabled(!self.busy && parent.is_some(), egui::Button::new(RichText::new("Back").size(16.0)))
-                    .on_hover_text("Go up one folder")
+                    .add_enabled(!self.busy && !self.back_stack.is_empty(), egui::Button::new(RichText::new(ICON_BACK).size(16.0)))
+                    .on_hover_text("Back to what you had open before")
                     .clicked()
                 {
-                    if let Some(p) = parent {
-                        self.open(ctx, p, false);
-                    }
+                    self.go_back(ctx);
                 }
-                if ui
-                    .add_enabled(!self.busy && self.path.is_some(), egui::Button::new(RichText::new("Refresh").size(16.0)))
-                    .on_hover_text("Reload what's open")
-                    .clicked()
-                {
+                if ui.add_enabled(!self.busy && self.path.is_some(), egui::Button::new(RichText::new(ICON_REFRESH).size(16.0))).clicked() {
                     if let Some(p) = self.path.clone() {
                         self.open(ctx, p, false);
                     }
@@ -1558,8 +1861,10 @@ impl eframe::App for App {
         self.delete_ui(ctx);
         self.shadpkg_missing_ui(ctx);
         self.anyps5_missing_ui(ctx);
+        self.rpcs3_missing_ui(ctx);
         self.update_ui(ctx);
 
+        self.actions_bottom = None;
         egui::CentralPanel::default().show(ctx, |ui| {
 
             // The passcode row only appears for an encrypted package.
@@ -1622,54 +1927,51 @@ impl eframe::App for App {
 
             let Some(loaded) = &self.loaded else {
                 ui.add_space(40.0);
-                let mut reopen = None;
                 ui.vertical_centered(|ui| {
                     ui.heading("Drag a PKG (PS4) file here");
-                    ui.weak("or open a folder containing a decrypted PS5 game (Open folder…).");
-                    if !self.settings.recent.is_empty() && !self.busy {
-                        ui.add_space(24.0);
-                        ui.strong("Recent");
-                        ui.add_space(4.0);
-                        for p in &self.settings.recent {
-                            let exists = p.exists();
-                            let resp = ui.add_enabled(exists, egui::Link::new(file_label(p)));
-                            let resp = resp.on_hover_text(p.display().to_string()).on_disabled_hover_text("Not found any more");
-                            if resp.clicked() {
-                                reopen = Some(p.clone());
-                            }
-                        }
+                    ui.weak("or open a folder containing a decrypted PS5 or PS3 game (Open folder…).");
+                    if !self.library.entries.is_empty() {
+                        ui.add_space(12.0);
+                        ui.weak(format!("Your saved games are under {ICON_LIBRARY} Library."));
                     }
                 });
-                if let Some(p) = reopen {
-                    self.start_load(ctx, p);
-                }
                 return;
             };
 
-            // Icon, title, title ID and version, when the game has them.
-            if !loaded.info.is_empty() {
-                ui.horizontal(|ui| {
-                    if let Some(tex) = &self.icon_tex {
-                        ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(88.0, 88.0)));
-                    }
-                    ui.vertical(|ui| {
-                        ui.add_space(8.0);
-                        let title = loaded.info.title.as_deref().unwrap_or("Untitled game");
+            // Icon, title (with the Library star), title ID and version.
+            let mut do_star = false;
+            let starred = self.path.as_deref().is_some_and(|p| self.library.contains(p));
+            ui.horizontal(|ui| {
+                if let Some(tex) = &self.icon_tex {
+                    ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(88.0, 88.0)));
+                }
+                ui.vertical(|ui| {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let fallback = self.path.as_deref().map(file_label).unwrap_or_default();
+                        let title = loaded.info.title.clone().unwrap_or(fallback);
                         ui.label(RichText::new(title).size(22.0).strong());
-                        let mut sub = Vec::new();
-                        if let Some(id) = &loaded.info.title_id {
-                            sub.push(id.clone());
-                        }
-                        if let Some(v) = &loaded.info.version {
-                            sub.push(format!("version {v}"));
-                        }
-                        if !sub.is_empty() {
-                            ui.weak(sub.join("  ·  "));
-                        }
+                        let star = RichText::new(if starred { ICON_STARRED } else { ICON_STAR })
+                            .size(22.0)
+                            .color(if starred { Color32::from_rgb(0xE8, 0xB3, 0x2A) } else { ui.visuals().weak_text_color() });
+                        do_star = ui
+                            .add(egui::Button::new(star).frame(false))
+                            .on_hover_text(if starred { "Remove from your Library" } else { "Save to your Library" })
+                            .clicked();
                     });
+                    let mut sub = Vec::new();
+                    if let Some(id) = &loaded.info.title_id {
+                        sub.push(id.clone());
+                    }
+                    if let Some(v) = &loaded.info.version {
+                        sub.push(format!("version {v}"));
+                    }
+                    if !sub.is_empty() {
+                        ui.weak(sub.join("  ·  "));
+                    }
                 });
-                ui.add_space(6.0);
-            }
+            });
+            ui.add_space(6.0);
 
             egui::Grid::new("info").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
                 for (k, v) in &loaded.rows {
@@ -1683,6 +1985,7 @@ impl eframe::App for App {
             let ready = loaded.input.is_some() && !self.busy;
             let is_package = matches!(loaded.input, Some(Input::Package(_)));
             let has_files = matches!(loaded.input, Some(Input::Package(_) | Input::Folder(_)));
+            let ps3 = loaded.ps3_eboot.is_some();
             let mut do_convert = false;
             let mut menu_action = None;
             let mut do_extract = false;
@@ -1690,25 +1993,53 @@ impl eframe::App for App {
             let mut do_pick_anyps5 = false;
             let mut do_launch = false;
             let mut do_stop = false;
+            let mut do_rpcs3 = false;
+            let mut do_pick_rpcs3 = false;
+            let mut do_update_anyps5 = false;
             let is_folder = matches!(loaded.input, Some(Input::Folder(_)));
-            ui.horizontal(|ui| {
-                let label = match (&self.selected, has_files) {
-                    (Some(p), true) => format!("Convert {} to ELF…", p.rsplit('/').next().unwrap_or(p)),
-                    _ => "Convert to ELF…".to_string(),
-                };
-                do_convert = ui
-                    .add_enabled(ready, egui::Button::new(RichText::new(label).size(15.0)))
-                    .on_hover_text("ELF is the file type AnyPS5 needs.")
-                    .clicked();
-                do_extract = ui
-                    .add_enabled(ready && is_package, egui::Button::new(RichText::new("Extract all files…").size(15.0)))
-                    .on_hover_text("Unpacks everything inside the .pkg into a normal folder.")
-                    .clicked();
-            });
-            // AnyPS5 only runs PS5 games, so PS4 games get no AnyPS5 buttons.
-            if !self.is_ps4 {
+            let running = self.game_running();
+            // PS3 executables can't be converted; RPCS3 runs them as they are.
+            if !ps3 && loaded.input.is_some() {
                 ui.horizontal(|ui| {
-                    let running = self.game_running();
+                    let label = match (&self.selected, has_files) {
+                        (Some(p), true) => format!("Convert {} to ELF…", p.rsplit('/').next().unwrap_or(p)),
+                        _ => "Convert to ELF…".to_string(),
+                    };
+                    do_convert = ui
+                        .add_enabled(ready, egui::Button::new(RichText::new(label).size(15.0)))
+                        .on_hover_text("ELF is the file type AnyPS5 needs.")
+                        .clicked();
+                    // Only an unlocked package has files to extract.
+                    if is_package {
+                        do_extract = ui
+                            .add_enabled(ready, egui::Button::new(RichText::new("Extract all files…").size(15.0)))
+                            .on_hover_text("Unpacks everything inside the .pkg into a normal folder.")
+                            .clicked();
+                    }
+                });
+            }
+            if ps3 {
+                ui.horizontal(|ui| {
+                    do_rpcs3 = ui
+                        .add_enabled(ready && !running, egui::Button::new(RichText::new("Run in RPCS3").size(15.0)))
+                        .on_hover_text("Plays this game in your RPCS3 and saves it to your Library.")
+                        .clicked();
+                    if running {
+                        do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
+                    }
+                    match find_rpcs3(&self.settings) {
+                        Some(exe) => {
+                            do_pick_rpcs3 = ui
+                                .add_enabled(!self.busy, egui::Link::new(RichText::new(format!("RPCS3: {}", exe.display())).monospace()))
+                                .on_hover_text("Click to change.")
+                                .clicked();
+                        }
+                        None => do_pick_rpcs3 = ui.add_enabled(!self.busy, egui::Button::new("RPCS3…")).clicked(),
+                    }
+                });
+            } else if !self.is_ps4 && loaded.input.is_some() {
+                // AnyPS5 only runs PS5 games, so PS4 games get no AnyPS5 buttons.
+                ui.horizontal(|ui| {
                     do_run = ui
                         .add_enabled(
                             ready && is_folder && !running,
@@ -1749,11 +2080,24 @@ impl eframe::App for App {
                         }
                     }
                 });
+                if let Some(tag) = &self.anyps5_update {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("AnyPS5 {tag} is out.")).color(Color32::from_rgb(0x2E, 0xA0, 0x43)));
+                        do_update_anyps5 = ui
+                            .add_enabled(!self.busy, egui::Button::new("Update AnyPS5").small())
+                            .on_hover_text("Downloads it from AnyPS5's GitHub releases into a new folder next to your current one.")
+                            .clicked();
+                    });
+                }
             }
+            // The log stops above this line, so these buttons stay usable.
+            self.actions_bottom = Some(ui.cursor().top());
 
             if has_files && !loaded.files.is_empty() {
                 ui.add_space(8.0);
-                ui.label(if is_package {
+                ui.label(if ps3 {
+                    "Files in the folder:"
+                } else if is_package {
                     "Files in the package (click one to choose what gets converted):"
                 } else {
                     "Files in the folder (click one to choose what gets converted):"
@@ -1775,7 +2119,7 @@ impl eframe::App for App {
                                 clicked = Some(f.path.clone());
                             }
                             resp.context_menu(|ui| {
-                                if ui.add_enabled(!self.busy, egui::Button::new("Convert to ELF…")).clicked() {
+                                if !ps3 && ui.add_enabled(!self.busy, egui::Button::new("Convert to ELF…")).clicked() {
                                     menu_action = Some(RowAction::ConvertInner(f.path.clone()));
                                     ui.close_menu();
                                 }
@@ -1802,6 +2146,9 @@ impl eframe::App for App {
             if let Some(a) = menu_action {
                 self.apply_row_action(ctx, a);
             }
+            if do_star {
+                self.toggle_library();
+            }
             if do_convert {
                 self.convert(ctx);
             }
@@ -1816,6 +2163,9 @@ impl eframe::App for App {
                     self.pick_anyps5();
                 }
             }
+            if do_update_anyps5 {
+                self.update_anyps5(ctx);
+            }
             if do_run {
                 self.run_anyps5();
             }
@@ -1825,6 +2175,21 @@ impl eframe::App for App {
             if do_stop {
                 self.stop_game();
             }
+            if do_pick_rpcs3 {
+                self.rpcs3_missing = true;
+            }
+            if do_rpcs3 {
+                if let Some(p) = self.path.clone() {
+                    self.run_rpcs3(ctx, &p);
+                }
+            }
         });
     }
 }
+
+/// Toolbar and title icons (all in egui's built-in fonts).
+const ICON_BACK: &str = "⬅";
+const ICON_REFRESH: &str = "⟳";
+const ICON_STAR: &str = "☆";
+const ICON_STARRED: &str = "★";
+const ICON_LIBRARY: &str = "📚";
