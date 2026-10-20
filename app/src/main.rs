@@ -1795,41 +1795,11 @@ impl eframe::App for App {
                 ui.add_space(2.0);
             }
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!self.busy && !self.back_stack.is_empty(), egui::Button::new(RichText::new(ICON_BACK).size(16.0)))
-                    .on_hover_text("Back to what you had open before")
-                    .clicked()
-                {
-                    self.go_back(ctx);
-                }
-                if ui.add_enabled(!self.busy && self.path.is_some(), egui::Button::new(RichText::new(ICON_REFRESH).size(16.0))).clicked() {
-                    if let Some(p) = self.path.clone() {
-                        self.open(ctx, p, false);
-                    }
-                }
-                ui.separator();
                 if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Open file…").size(16.0))).clicked() {
                     self.pick_file(ctx);
                 }
                 if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Open folder…").size(16.0))).clicked() {
                     self.pick_folder(ctx);
-                }
-                if ui
-                    .add(egui::SelectableLabel::new(self.show_history, RichText::new("History").size(16.0)))
-                    .on_hover_text("Everything PKG Master wrote, with Revert")
-                    .clicked()
-                {
-                    self.show_history = !self.show_history;
-                }
-                // shadPKG only makes sense for an open PS4 package.
-                let ps4_pkg = self.is_ps4 && self.path.as_deref().is_some_and(is_pkg_path);
-                if ps4_pkg
-                    && ui
-                        .add_enabled(!self.busy, egui::Button::new(RichText::new("Run shadPKG (PS4)…").size(16.0)))
-                        .on_hover_text("Extract this PS4 package with your shadPKG")
-                        .clicked()
-                {
-                    self.run_shadpkg(ctx);
                 }
                 let mut picked = None;
                 ui.add_enabled_ui(!self.busy, |ui| {
@@ -1845,6 +1815,36 @@ impl eframe::App for App {
                         let _ = self.library.save();
                     }
                     None => {}
+                }
+                // shadPKG only makes sense for an open PS4 package.
+                let ps4_pkg = self.is_ps4 && self.path.as_deref().is_some_and(is_pkg_path);
+                if ps4_pkg
+                    && ui
+                        .add_enabled(!self.busy, egui::Button::new(RichText::new("Run shadPKG (PS4)…").size(16.0)))
+                        .on_hover_text("Extract this PS4 package with your shadPKG")
+                        .clicked()
+                {
+                    self.run_shadpkg(ctx);
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(!self.busy && !self.back_stack.is_empty(), egui::Button::new(RichText::new(ICON_BACK).size(16.0)))
+                    .on_hover_text("Back to what you had open before")
+                    .clicked()
+                {
+                    self.go_back(ctx);
+                }
+                if ui.add_enabled(!self.busy && self.path.is_some(), egui::Button::new(RichText::new(ICON_REFRESH).size(16.0))).clicked() {
+                    if let Some(p) = self.path.clone() {
+                        self.open(ctx, p, false);
+                    }
+                }
+                if ui
+                    .add(egui::SelectableLabel::new(self.show_history, RichText::new("History").size(16.0)))
+                    .on_hover_text("Everything PKG Master wrote, with Revert")
+                    .clicked()
+                {
+                    self.show_history = !self.show_history;
                 }
                 if self.busy {
                     ui.spinner();
