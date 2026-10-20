@@ -69,12 +69,19 @@ pub fn settings_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("pkgmaster-settings.ini"))
 }
 
+/// Most entries kept in the Recent list.
+pub const RECENT_LIMIT: usize = 10;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     /// AnyPS5's release folder (the one holding libs/).
     pub anyps5_dir: Option<PathBuf>,
     /// The relinker, when it is not inside `anyps5_dir`.
     pub relinker: Option<PathBuf>,
+    /// Recently opened games, newest first.
+    pub recent: Vec<PathBuf>,
+    /// A PKG Master release the user chose to skip, such as `v0.1.4`.
+    pub skip_version: Option<String>,
 }
 
 impl Settings {
@@ -91,6 +98,8 @@ impl Settings {
             match k.trim() {
                 "anyps5_dir" => s.anyps5_dir = Some(PathBuf::from(v)),
                 "relinker" => s.relinker = Some(PathBuf::from(v)),
+                "recent" if s.recent.len() < RECENT_LIMIT => s.recent.push(PathBuf::from(v)),
+                "skip_version" => s.skip_version = Some(v.to_string()),
                 _ => {}
             }
         }
@@ -111,7 +120,22 @@ impl Settings {
             text.push_str(&format!("relinker={}
 ", r.display()));
         }
+        for p in &self.recent {
+            text.push_str(&format!("recent={}
+", p.display()));
+        }
+        if let Some(v) = &self.skip_version {
+            text.push_str(&format!("skip_version={v}
+"));
+        }
         Ok(fs::write(path, text)?)
+    }
+
+    /// Put `path` at the top of the Recent list.
+    pub fn remember(&mut self, path: &Path) {
+        self.recent.retain(|p| p != path);
+        self.recent.insert(0, path.to_path_buf());
+        self.recent.truncate(RECENT_LIMIT);
     }
 
     /// The release these settings describe, if it is complete.
@@ -204,51 +228,55 @@ pub const ANYPS5_RELEASES: &str = "https://github.com/boykopovar/AnyPS5/releases
 /// Only on the user's request: download the latest official AnyPS5 release
 /// (`prx-windows-v….zip` and `relinker-v….exe`) into `dest`, unpack it and
 /// put the relinker next to `libs/`. Returns the folder holding `libs/`.
-pub fn install_release(dest: &Path, progress: crate::convert::Progress) -> Result<PathBuf> {
+pub fn install_release(
+    dest: &Path,
+    progress: crate::convert::Progress,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<PathBuf> {
     use crate::download::{download, latest_release, unzip};
 
     let release = latest_release(ANYPS5_REPO)?;
     let pick = |prefix: &str, ext: &str| {
-        release
-            .assets
-            .iter()
-            .find(|a| {
-                let n = a.name.to_lowercase();
-                n.starts_with(prefix) && n.ends_with(ext)
-            })
-            .cloned()
-            .ok_or_else(|| {
-                Error::Conversion(format!(
-                    "AnyPS5's latest release ({}) has no {prefix}…{ext} file; download it by hand from {ANYPS5_RELEASES}",
-                    release.tag
-                ))
-            })
+        release.asset(prefix, ext).cloned().ok_or_else(|| {
+            Error::Conversion(format!(
+                "AnyPS5's latest release ({}) has no {prefix}…{ext} file; download it by hand from {ANYPS5_RELEASES}",
+                release.tag
+            ))
+        })
     };
     let (zip_asset, relinker_asset) = (pick("prx-windows", ".zip")?, pick("relinker", ".exe")?);
 
-    fs::create_dir_all(dest)?;
-    let zip_path = dest.join(&zip_asset.name);
-    download(&zip_asset, &zip_path, progress)?;
-    let unpacked = unzip(&zip_path, dest, progress);
-    let _ = fs::remove_file(&zip_path);
-    unpacked?;
+    // A folder this download created is removed again if it fails or is cancelled.
+    let fresh = !dest.exists();
+    let result = (|| -> Result<PathBuf> {
+        fs::create_dir_all(dest)?;
+        let zip_path = dest.join(&zip_asset.name);
+        download(&zip_asset, &zip_path, progress, cancel)?;
+        let unpacked = unzip(&zip_path, dest, progress, cancel);
+        let _ = fs::remove_file(&zip_path);
+        unpacked?;
 
-    // The zip may hold libs/ directly or inside one top-level folder.
-    let home = if find_libs(dest).is_ok() {
-        dest.to_path_buf()
-    } else {
-        let subs: Vec<PathBuf> = fs::read_dir(dest)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_dir() && find_libs(p).is_ok())
-            .collect();
-        match subs.as_slice() {
-            [one] => one.clone(),
-            _ => return Err(Error::Conversion(format!("the AnyPS5 download has no libs/ folder (in {})", dest.display()))),
-        }
-    };
-    download(&relinker_asset, &home.join(&relinker_asset.name), progress)?;
-    Ok(home)
+        // The zip may hold libs/ directly or inside one top-level folder.
+        let home = if find_libs(dest).is_ok() {
+            dest.to_path_buf()
+        } else {
+            let subs: Vec<PathBuf> = fs::read_dir(dest)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && find_libs(p).is_ok())
+                .collect();
+            match subs.as_slice() {
+                [one] => one.clone(),
+                _ => return Err(Error::Conversion(format!("the AnyPS5 download has no libs/ folder (in {})", dest.display()))),
+            }
+        };
+        download(&relinker_asset, &home.join(&relinker_asset.name), progress, cancel)?;
+        Ok(home)
+    })();
+    if result.is_err() && fresh {
+        let _ = fs::remove_dir_all(dest);
+    }
+    result
 }
 
 /// Whether `path` starts like a PS4 SELF.

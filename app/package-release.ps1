@@ -48,6 +48,8 @@ If Windows says "Windows protected your PC", click More info, then Run anyway
   (https://github.com/seregonwar/ShadPKG/releases) and drop it in the
   shadpkg folder next to this file.
 - History: undo anything the app wrote.
+- Recent: the games you opened lately.
+- Updates: when a new version is out, the app offers to update itself.
 - Shows the game's title, title ID, version and icon when you open it.
 
 No Sony keys are included; retail packages can't be decrypted.
