@@ -17,5 +17,6 @@ pub mod history;
 pub mod meta;
 pub mod pfs;
 pub mod pkg;
+pub mod update;
 
 pub use error::{Error, Result};

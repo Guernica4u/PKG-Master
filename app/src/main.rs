@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -21,7 +22,9 @@ use pkgmaster::binary::fmt_size;
 use pkgmaster::convert::{
     convert_to_elf, default_output_name, extract_all, load, Input, Loaded,
 };
+use pkgmaster::download::{Release, CANCELLED};
 use pkgmaster::history::{ago, History};
+use pkgmaster::update;
 use pkgmaster::Error;
 
 const PACKAGE_EXTS: [&str; 1] = ["pkg"];
@@ -37,6 +40,7 @@ fn main() -> eframe::Result {
             .with_icon(window_icon()),
         ..Default::default()
     };
+    update::clean_up_old_files();
     // A file passed on the command line (or dropped onto the .exe) opens at start.
     let initial = std::env::args_os().nth(1).map(PathBuf::from);
     eframe::run_native(
@@ -44,6 +48,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let mut app = App::new();
+            app.check_for_update(&cc.egui_ctx);
             if let Some(path) = initial {
                 app.start_load(&cc.egui_ctx, path);
             }
@@ -65,6 +70,10 @@ enum Msg {
     Loaded(PathBuf, Result<Loaded, Error>, bool),
     /// "Download for me" finished: the AnyPS5 folder, or why not.
     AnyPs5Installed(Result<PathBuf, Error>),
+    /// A newer PKG Master is on GitHub.
+    UpdateFound(Release),
+    /// "Update now" finished: the new program to start, or why not.
+    Updated(Result<PathBuf, Error>),
     Progress(u64, u64, String),
     Done(Result<String, Error>),
     Log(String),
@@ -125,6 +134,15 @@ struct App {
     anyps5_missing: bool,
     /// The open game is a PS4 title, so the AnyPS5 buttons are hidden.
     is_ps4: bool,
+    /// Set to stop the running download.
+    cancel: Arc<AtomicBool>,
+    /// The running job is a download that Cancel can stop.
+    cancellable: bool,
+    /// A newer release, once the startup check finds one.
+    update: Option<Release>,
+    show_update: bool,
+    /// When Copy log was last pressed (egui time), to show "Copied".
+    copied_at: Option<f64>,
 }
 
 /// Something picked from a file's right-click menu.
@@ -177,6 +195,11 @@ impl App {
             shadpkg_missing: false,
             anyps5_missing: false,
             is_ps4: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+            cancellable: false,
+            update: None,
+            show_update: false,
+            copied_at: None,
         }
     }
 
@@ -516,7 +539,7 @@ impl App {
         });
     }
 
-    fn handle_messages(&mut self) {
+    fn handle_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Loaded(path, result, ps4) => {
@@ -543,6 +566,8 @@ impl App {
                             self.loaded = Some(l);
                             self.icon_tex = None;
                             self.is_ps4 = ps4;
+                            self.settings.remember(&path);
+                            let _ = self.settings.save(&settings_path());
                         }
                         Err(e) => self.status = Status::Err(describe_error(&e)),
                     }
@@ -566,8 +591,28 @@ impl App {
                         Err(e) => Status::Err(describe_error(&e)),
                     };
                 }
+                Msg::UpdateFound(release) => {
+                    // Shown once per start, unless the user skipped this version.
+                    self.show_update = self.settings.skip_version.as_deref() != Some(release.tag.as_str());
+                    self.update = Some(release);
+                }
+                Msg::Updated(result) => {
+                    self.busy = false;
+                    self.cancellable = false;
+                    self.progress = None;
+                    match result {
+                        Ok(exe) => match std::process::Command::new(&exe).spawn() {
+                            Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                            Err(e) => {
+                                self.status = Status::Ok(format!("Updated. Start PKG Master again to use the new version ({e})."))
+                            }
+                        },
+                        Err(e) => self.status = download_status(&e),
+                    }
+                }
                 Msg::AnyPs5Installed(result) => {
                     self.busy = false;
+                    self.cancellable = false;
                     self.progress = None;
                     self.status = match result {
                         Ok(dir) => {
@@ -582,7 +627,7 @@ impl App {
                                 )),
                             }
                         }
-                        Err(e) => Status::Err(describe_error(&e)),
+                        Err(e) => download_status(&e),
                     };
                 }
                 Msg::Exited(m) => {
@@ -703,6 +748,128 @@ impl App {
         }
     }
 
+    /// The Recent menu's entries; returns the one picked. Entries that no
+    /// longer exist are greyed out.
+    fn recent_menu(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
+        let mut picked = None;
+        for p in &self.settings.recent {
+            let resp = ui
+                .add_enabled(p.exists(), egui::Button::new(file_label(p)))
+                .on_hover_text(p.display().to_string())
+                .on_disabled_hover_text(format!("{} (not found any more)", p.display()));
+            if resp.clicked() {
+                picked = Some(p.clone());
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        if ui.button("Clear list").clicked() {
+            self.settings.recent.clear();
+            let _ = self.settings.save(&settings_path());
+            ui.close_menu();
+        }
+        picked
+    }
+
+    /// Run a download on a worker thread with progress and a Cancel button;
+    /// `job` returns the message to send when it ends.
+    fn spawn_download<F>(&mut self, ctx: &egui::Context, job: F)
+    where
+        F: FnOnce(&dyn Fn(u64, u64, &str), &AtomicBool) -> Msg + Send + 'static,
+    {
+        self.busy = true;
+        self.cancellable = true;
+        self.cancel.store(false, Ordering::Relaxed);
+        self.progress = Some((0, 0, String::new()));
+        let (tx, ctx, cancel) = (self.tx.clone(), ctx.clone(), self.cancel.clone());
+        thread::spawn(move || {
+            let progress = |done: u64, total: u64, item: &str| {
+                let _ = tx.send(Msg::Progress(done, total, item.to_string()));
+                ctx.request_repaint();
+            };
+            let _ = tx.send(job(&progress, &cancel));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Look for a newer PKG Master in the background (skipped when
+    /// `PKGMASTER_NO_UPDATE_CHECK` is set). A failed check is silent.
+    fn check_for_update(&self, ctx: &egui::Context) {
+        if std::env::var_os("PKGMASTER_NO_UPDATE_CHECK").is_some() {
+            return;
+        }
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        thread::spawn(move || {
+            if let Ok(Some(release)) = update::check() {
+                let _ = tx.send(Msg::UpdateFound(release));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// "PKG Master vX is out", with Update now.
+    fn update_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_update {
+            return;
+        }
+        let Some(release) = self.update.clone() else { return };
+        let (mut now, mut later, mut skip) = (false, false, false);
+        egui::Window::new("Update available")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(480.0);
+                ui.label(
+                    RichText::new(format!("PKG Master {} is out. You have v{}.", release.tag, update::current_version()))
+                        .size(16.0)
+                        .strong(),
+                );
+                if !release.notes.trim().is_empty() {
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                        for line in update::plain_notes(&release.notes) {
+                            match line {
+                                update::NoteLine::Heading(t) => {
+                                    ui.add_space(4.0);
+                                    ui.strong(t);
+                                }
+                                update::NoteLine::Bullet(t) => {
+                                    ui.label(format!("•  {t}"));
+                                }
+                                update::NoteLine::Text(t) => {
+                                    ui.label(t);
+                                }
+                            }
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+                ui.weak("Update now downloads it from GitHub, replaces this program and restarts it. Your settings, history, shadpkg and AnyPS5 folders stay as they are.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    now = ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Update now").strong())).clicked();
+                    if ui.button("Open release page").clicked() {
+                        open_url(if release.page.is_empty() { update::RELEASES } else { &release.page });
+                    }
+                    later = ui.button("Later").clicked();
+                    skip = ui.button("Skip this version").clicked();
+                });
+            });
+        if now {
+            self.status = Status::Info(format!("Downloading PKG Master {}…", release.tag));
+            self.spawn_download(ctx, move |progress, cancel| Msg::Updated(update::install(&release, progress, cancel)));
+            self.show_update = false;
+        } else if skip {
+            self.settings.skip_version = Some(release.tag.clone());
+            let _ = self.settings.save(&settings_path());
+            self.update = None;
+            self.show_update = false;
+        } else if later {
+            self.show_update = false;
+        }
+    }
+
     /// Shown when an AnyPS5 button is pressed without AnyPS5 set up.
     fn anyps5_missing_ui(&mut self, ctx: &egui::Context) {
         if !self.anyps5_missing {
@@ -743,18 +910,8 @@ impl App {
             close = true;
         }
         if download {
-            self.busy = true;
-            self.progress = Some((0, 0, String::new()));
             self.status = Status::Info("Downloading AnyPS5 from its GitHub releases…".into());
-            let (tx, ctx) = (self.tx.clone(), ctx.clone());
-            thread::spawn(move || {
-                let progress = |done: u64, total: u64, item: &str| {
-                    let _ = tx.send(Msg::Progress(done, total, item.to_string()));
-                    ctx.request_repaint();
-                };
-                let _ = tx.send(Msg::AnyPs5Installed(install_release(&dest, &progress)));
-                ctx.request_repaint();
-            });
+            self.spawn_download(ctx, move |progress, cancel| Msg::AnyPs5Installed(install_release(&dest, progress, cancel)));
             close = true;
         }
         if close {
@@ -1093,12 +1250,37 @@ fn find_shadpkg() -> Option<PathBuf> {
     None
 }
 
-/// Where "Download for me" puts AnyPS5: an `AnyPS5\` folder next to this app.
+/// Where "Download for me" puts AnyPS5: an `AnyPS5\` folder next to this
+/// app, or `%LOCALAPPDATA%\PKG Master\AnyPS5` when the app's folder can't be
+/// written to (such as Program Files). Worked out once.
 fn anyps5_download_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(|d| d.join("AnyPS5")))
-        .unwrap_or_else(|| PathBuf::from("AnyPS5"))
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let beside_app = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("AnyPS5")));
+        if let Some(dir) = beside_app.filter(|d| d.parent().is_some_and(can_write)) {
+            return dir;
+        }
+        std::env::var_os("LOCALAPPDATA")
+            .map(|d| Path::new(&d).join("PKG Master").join("AnyPS5"))
+            .unwrap_or_else(|| PathBuf::from("AnyPS5"))
+    })
+    .clone()
+}
+
+/// Whether a file can be created in `dir`.
+fn can_write(dir: &Path) -> bool {
+    let probe = dir.join(format!(".pkgmaster-write-test-{}", std::process::id()));
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// The status line for a download that ended with `e`: a cancel isn't an error.
+fn download_status(e: &Error) -> Status {
+    match e {
+        Error::Conversion(m) if m == CANCELLED => Status::Info(CANCELLED.into()),
+        other => Status::Err(describe_error(other)),
+    }
 }
 
 /// A PS4 game: a CUSA title ID, or, without a title ID, a PS4 package or a
@@ -1201,7 +1383,7 @@ fn describe_error(e: &Error) -> String {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.handle_messages();
+        self.handle_messages(ctx);
         self.update_game_header(ctx);
         if std::mem::take(&mut self.pending_refresh) {
             if let Some(p) = self.path.clone() {
@@ -1220,7 +1402,14 @@ impl eframe::App for App {
             ui.add_space(6.0);
             if let Some((done, total, item)) = &self.progress {
                 let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
-                ui.add(egui::ProgressBar::new(frac).show_percentage().text(item.as_str()));
+                ui.horizontal(|ui| {
+                    if self.cancellable && self.busy {
+                        if ui.button("Cancel").clicked() {
+                            self.cancel.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    ui.add(egui::ProgressBar::new(frac).show_percentage().text(item.as_str()));
+                });
             }
             let (text, color) = match &self.status {
                 Status::Info(m) => (m.as_str(), ui.visuals().text_color()),
@@ -1272,9 +1461,14 @@ impl eframe::App for App {
                     if ui.small_button("Clear").clicked() {
                         self.log.clear();
                     }
-                    if ui.small_button("Copy log").on_hover_text("Copy every line to the clipboard").clicked() {
+                    // The button says "Copied" for a moment; the status line is left alone.
+                    let now = ctx.input(|i| i.time);
+                    let copied = self.copied_at.is_some_and(|t| now - t < 1.5);
+                    let label = if copied { "Copied!" } else { "Copy log" };
+                    if ui.small_button(label).on_hover_text("Copy every line to the clipboard").clicked() {
                         ctx.copy_text(self.log.join("\n"));
-                        self.status = Status::Ok(format!("Copied {} log line(s).", self.log.len()));
+                        self.copied_at = Some(now);
+                        ctx.request_repaint_after(Duration::from_millis(1600));
                     }
                 });
                 egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
@@ -1288,6 +1482,16 @@ impl eframe::App for App {
         // The toolbar spans the full width, above the History panel.
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.add_space(4.0);
+            // A slim row while a newer version is waiting.
+            if let Some(tag) = self.update.as_ref().map(|r| r.tag.clone()) {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("PKG Master {tag} is out.")).color(Color32::from_rgb(0x2E, 0xA0, 0x43)));
+                    if ui.add_enabled(!self.busy, egui::Button::new("Update…").small()).clicked() {
+                        self.show_update = true;
+                    }
+                });
+                ui.add_space(2.0);
+            }
             ui.horizontal(|ui| {
                 if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Open file…").size(16.0))).clicked() {
                     self.pick_file(ctx);
@@ -1295,6 +1499,16 @@ impl eframe::App for App {
                 if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Open folder…").size(16.0))).clicked() {
                     self.pick_folder(ctx);
                 }
+                ui.add_enabled_ui(!self.busy && !self.settings.recent.is_empty(), |ui| {
+                    ui.menu_button(RichText::new("Recent").size(16.0), |ui| {
+                        if let Some(p) = self.recent_menu(ui) {
+                            self.start_load(ctx, p);
+                        }
+                    })
+                    .response
+                    .on_hover_text("Games you opened lately")
+                    .on_disabled_hover_text("Games you open show up here");
+                });
                 if ui
                     .add_enabled(!self.busy, egui::Button::new(RichText::new("Run shadPKG (PS4)…").size(16.0)))
                     .on_hover_text("Run on PS4 pkg files")
@@ -1344,6 +1558,7 @@ impl eframe::App for App {
         self.delete_ui(ctx);
         self.shadpkg_missing_ui(ctx);
         self.anyps5_missing_ui(ctx);
+        self.update_ui(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
 
@@ -1407,10 +1622,27 @@ impl eframe::App for App {
 
             let Some(loaded) = &self.loaded else {
                 ui.add_space(40.0);
+                let mut reopen = None;
                 ui.vertical_centered(|ui| {
                     ui.heading("Drag a PKG (PS4) file here");
                     ui.weak("or open a folder containing a decrypted PS5 game (Open folder…).");
+                    if !self.settings.recent.is_empty() && !self.busy {
+                        ui.add_space(24.0);
+                        ui.strong("Recent");
+                        ui.add_space(4.0);
+                        for p in &self.settings.recent {
+                            let exists = p.exists();
+                            let resp = ui.add_enabled(exists, egui::Link::new(file_label(p)));
+                            let resp = resp.on_hover_text(p.display().to_string()).on_disabled_hover_text("Not found any more");
+                            if resp.clicked() {
+                                reopen = Some(p.clone());
+                            }
+                        }
+                    }
                 });
+                if let Some(p) = reopen {
+                    self.start_load(ctx, p);
+                }
                 return;
             };
 

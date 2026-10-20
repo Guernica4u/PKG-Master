@@ -7,6 +7,7 @@ name = "pkgmaster"
 version = "0.1.0"
 description = "Inspect PS4/PS5 PKG files and convert their contents to standard formats"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = ["cryptography>=41"]
 keywords = ["ps4", "ps5", "pkg", "pfs", "elf", "self", "fpkg"]
