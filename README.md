@@ -18,6 +18,7 @@ unzip it and run `pkgmaster-gui.exe`. Nothing to install.
 | **Open file…** | Open a `.pkg`, or a single `eboot.bin` / `.prx` / `.sprx` / `.elf`. You can also drag a file onto the window or onto the `.exe`. |
 | **Open folder…** | Open a decrypted game folder (the one holding `eboot.bin` or `eboot.elf`, `sce_module/` and `sce_sys/`). Other folders are listed so you can click through them: a folder with a single `.pkg` opens it, and a folder with a single subfolder steps into it. |
 | **Run shadPKG (PS4)…** | Runs your own `shadpkg.exe` on a PS4 `.pkg` (see [shadPKG](#shadpkg)). |
+| **Recent** | The last 10 games you opened. They're also listed on the start screen. |
 | **Back / Refresh** | Go up one folder, or reload what's open. |
 | **History** | Everything the app has written, with **Revert** and **Show in Explorer**. See [History](#history). |
 | **Convert to ELF…** | Turns the selected file (by default `eboot.bin`) from Sony's SELF format into a standard ELF64, which is the file type AnyPS5 needs. Saves into a new `<name>-elf` folder next to the game files by default. |
@@ -28,6 +29,15 @@ unzip it and run `pkgmaster-gui.exe`. Nothing to install.
 **Right-click** any file in a list for **Convert to ELF**, **Show in
 Explorer**, **Copy path** and **Delete** (which moves it to the Recycle Bin).
 Files inside a `.pkg` are read-only, so those only get Convert and Copy path.
+
+### Updates
+
+When a new version is out, PKG Master tells you when it starts. **Update now**
+downloads it from this repo's releases, checks it against GitHub's SHA-256,
+replaces the program and restarts it. Your settings, history, `shadpkg` and
+`AnyPS5` folders are left alone. **Skip this version** stops it asking about
+that release. If the app's folder can't be written to, it points you to the
+download page instead.
 
 ### History
 
@@ -44,7 +54,9 @@ backups to free the space.
 starting with `PPSA`) into Windows programs. It isn't included. The first time
 you press an AnyPS5 button, PKG Master explains how to get it, and its
 **Download for me** button fetches the official release from AnyPS5's GitHub
-page into an `AnyPS5` folder next to `pkgmaster-gui.exe` and sets it up.
+page, checks it against GitHub's SHA-256, unpacks it into an `AnyPS5` folder
+next to `pkgmaster-gui.exe` (or `%LOCALAPPDATA%\PKG Master\AnyPS5` if that
+folder can't be written to) and sets it up. **Cancel** stops the download.
 
 To set it up by hand instead:
 
@@ -127,6 +139,11 @@ wrong, `4` not supported yet.
 
 Format details are documented in [`HANDOFF.md`](HANDOFF.md).
 
+## License
+
+PKG Master is under the [MIT license](LICENSE). shadPKG and AnyPS5 are
+separate projects with their own licenses; neither is included.
+
 ## Credits
 
 Format details were cross-checked against
@@ -135,5 +152,6 @@ Format details were cross-checked against
 [MkPFS](https://github.com/PSBrew/MkPFS),
 [LibProsperoPKG](https://github.com/SvenGDK/LibProsperoPKG) and
 [ps4_unfself](https://github.com/SocraticBliss/ps4_unfself). No third-party
-code was copied. AnyPS5 is by
+code was copied. The app icon is egui's logo, from
+[egui/eframe](https://github.com/emilk/egui) (MIT/Apache-2.0). AnyPS5 is by
 [boykopovar and contributors](https://github.com/boykopovar/AnyPS5).

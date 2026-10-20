@@ -1,9 +1,13 @@
 //! Downloads from GitHub releases: the latest release's assets, a file
-//! with progress, and unpacking a zip.
+//! with progress, a SHA-256 check and Cancel, and unpacking a zip.
 
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use sha2::{Digest, Sha256};
 
 use crate::convert::Progress;
 use crate::error::{Error, Result};
@@ -14,18 +18,34 @@ pub struct Asset {
     pub name: String,
     pub url: String,
     pub size: u64,
+    /// The SHA-256 GitHub reports for the file (lowercase hex), when it does.
+    pub sha256: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Release {
     pub tag: String,
+    /// The release notes (Markdown).
+    pub notes: String,
+    /// The release's page on GitHub.
+    pub page: String,
     pub assets: Vec<Asset>,
+}
+
+impl Release {
+    /// The first asset whose lowercase name starts with `prefix` and ends with `ext`.
+    pub fn asset(&self, prefix: &str, ext: &str) -> Option<&Asset> {
+        self.assets.iter().find(|a| {
+            let n = a.name.to_lowercase();
+            n.starts_with(prefix) && n.ends_with(ext)
+        })
+    }
 }
 
 const USER_AGENT: &str = concat!("PKG-Master/", env!("CARGO_PKG_VERSION"));
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().user_agent(USER_AGENT).build()
+    ureq::AgentBuilder::new().user_agent(USER_AGENT).timeout_connect(Duration::from_secs(15)).build()
 }
 
 fn net_error(what: &str, e: ureq::Error) -> Error {
@@ -47,7 +67,7 @@ pub fn latest_release(repo: &str) -> Result<Release> {
         .into_string()?;
     let v: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| Error::Conversion(format!("{what}: {e}")))?;
-    let tag = v.get("tag_name").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+    let text = |key: &str| v.get(key).and_then(|t| t.as_str()).unwrap_or_default().to_string();
     let assets = v
         .get("assets")
         .and_then(|a| a.as_array())
@@ -58,17 +78,24 @@ pub fn latest_release(repo: &str) -> Result<Release> {
                         name: a.get("name")?.as_str()?.to_string(),
                         url: a.get("browser_download_url")?.as_str()?.to_string(),
                         size: a.get("size").and_then(|s| s.as_u64()).unwrap_or(0),
+                        sha256: a
+                            .get("digest")
+                            .and_then(|d| d.as_str())
+                            .and_then(|d| d.strip_prefix("sha256:"))
+                            .map(str::to_lowercase),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default();
-    Ok(Release { tag, assets })
+    Ok(Release { tag: text("tag_name"), notes: text("body"), page: text("html_url"), assets })
 }
 
-/// Download `asset` to `dest`. It is written to `dest.part` first and only
-/// renamed once complete, so a cancelled download never looks finished.
-pub fn download(asset: &Asset, dest: &Path, progress: Progress) -> Result<()> {
+/// Download `asset` to `dest`, checking its SHA-256 when GitHub gave one.
+/// It is written to `dest.part` first and only renamed once complete and
+/// checked, so a failed or cancelled download never looks finished. Setting
+/// `cancel` stops it.
+pub fn download(asset: &Asset, dest: &Path, progress: Progress, cancel: &AtomicBool) -> Result<()> {
     let what = format!("Could not download {}", asset.name);
     let resp = agent().get(&asset.url).call().map_err(|e| net_error(&what, e))?;
     let total = resp.header("Content-Length").and_then(|l| l.parse().ok()).unwrap_or(asset.size);
@@ -76,20 +103,37 @@ pub fn download(asset: &Asset, dest: &Path, progress: Progress) -> Result<()> {
     let result = (|| -> Result<()> {
         let mut reader = resp.into_reader();
         let mut out = fs::File::create(&part)?;
+        let mut hash = Sha256::new();
         let mut buf = vec![0u8; 1 << 16];
         let mut done = 0u64;
         loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Error::Conversion(CANCELLED.into()));
+            }
             let n = reader.read(&mut buf)?;
             if n == 0 {
                 break;
             }
             out.write_all(&buf[..n])?;
+            hash.update(&buf[..n]);
             done += n as u64;
             progress(done, total, &format!("Downloading {}", asset.name));
         }
         out.sync_all()?;
+        drop(out);
         if total > 0 && done != total {
             return Err(Error::Conversion(format!("{what}: got {done} of {total} bytes")));
+        }
+        if let Some(want) = &asset.sha256 {
+            let got: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+            if &got != want {
+                return Err(Error::Conversion(format!(
+                    "{what}: the file is damaged (its SHA-256 doesn't match GitHub's). Try again."
+                )));
+            }
+        }
+        if dest.exists() {
+            fs::remove_file(dest)?;
         }
         fs::rename(&part, dest)?;
         Ok(())
@@ -100,12 +144,19 @@ pub fn download(asset: &Asset, dest: &Path, progress: Progress) -> Result<()> {
     result
 }
 
-/// Unpack `zip` into `dest`. Entries that would land outside `dest` are refused.
-pub fn unzip(zip: &Path, dest: &Path, progress: Progress) -> Result<()> {
+/// The message a cancelled download fails with.
+pub const CANCELLED: &str = "Download cancelled.";
+
+/// Unpack `zip` into `dest`. Entries that would land outside `dest` are
+/// refused. Setting `cancel` stops it between files.
+pub fn unzip(zip: &Path, dest: &Path, progress: Progress, cancel: &AtomicBool) -> Result<()> {
     let bad = |e: zip::result::ZipError| Error::Conversion(format!("{} is not a usable zip: {e}", zip.display()));
     let mut archive = zip::ZipArchive::new(fs::File::open(zip)?).map_err(bad)?;
     let total = archive.len() as u64;
     for i in 0..archive.len() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Conversion(CANCELLED.into()));
+        }
         let mut entry = archive.by_index(i).map_err(bad)?;
         let Some(rel) = entry.enclosed_name() else {
             return Err(Error::Conversion(format!("{} has an unsafe path: {}", zip.display(), entry.name())));
@@ -146,7 +197,7 @@ mod tests {
         let zip = dir.join("a.zip");
         make_zip(&zip, &[("prx-windows/libs/libc.prx", b"x"), ("prx-windows/USAGE.md", b"hi")]);
         let out = dir.join("out");
-        unzip(&zip, &out, &|_, _, _| {}).unwrap();
+        unzip(&zip, &out, &|_, _, _| {}, &AtomicBool::new(false)).unwrap();
         assert_eq!(fs::read(out.join("prx-windows/libs/libc.prx")).unwrap(), b"x");
         assert_eq!(fs::read(out.join("prx-windows/USAGE.md")).unwrap(), b"hi");
         let _ = fs::remove_dir_all(&dir);
@@ -159,7 +210,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let zip = dir.join("bad.zip");
         make_zip(&zip, &[("../escaped.txt", b"no")]);
-        assert!(unzip(&zip, &dir.join("out"), &|_, _, _| {}).is_err());
+        assert!(unzip(&zip, &dir.join("out"), &|_, _, _| {}, &AtomicBool::new(false)).is_err());
+        // A cancelled unzip stops before writing anything.
+        assert!(unzip(&zip, &dir.join("out2"), &|_, _, _| {}, &AtomicBool::new(true)).is_err());
+        assert!(!dir.join("out2").exists());
         assert!(!dir.join("escaped.txt").exists());
         let _ = fs::remove_dir_all(&dir);
     }
