@@ -180,22 +180,12 @@ fn settings_round_trip() {
     let s = Settings {
         anyps5_dir: Some(PathBuf::from(r"C:\Tools\prx-windows-v0.1.2")),
         relinker: Some(PathBuf::from(r"C:\Users\me\Downloads\relinker-v0.1.2.exe")),
-        recent: vec![PathBuf::from(r"D:\Games\PPSA01234"), PathBuf::from(r"D:\pkgs\game.pkg")],
         skip_version: Some("v9.9.9".into()),
+        anyps5_version: Some("v0.1.3".into()),
+        rpcs3: Some(PathBuf::from(r"D:\Emulators\RPCS3\rpcs3.exe")),
     };
     s.save(&path).unwrap();
     assert_eq!(Settings::load(&path), s);
-
-    // Recent keeps the newest first, without duplicates, up to the limit.
-    let mut r = Settings::default();
-    for i in 0..15 {
-        r.remember(&PathBuf::from(format!("game{i}")));
-    }
-    r.remember(&PathBuf::from("game12"));
-    assert_eq!(r.recent.len(), pkgmaster::anyps5::RECENT_LIMIT);
-    assert_eq!(r.recent[0], PathBuf::from("game12"));
-    assert_eq!(r.recent[1], PathBuf::from("game14"));
-    assert_eq!(r.recent.iter().filter(|p| p.as_path() == Path::new("game12")).count(), 1);
     let _ = fs::remove_dir_all(&tmp);
 }
 

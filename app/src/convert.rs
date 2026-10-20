@@ -129,6 +129,8 @@ pub struct Loaded {
     pub key_problem: Option<Error>,
     /// Title, title ID, version and icon, when the game has them.
     pub info: GameInfo,
+    /// For a dumped PS3 game: its USRDIR/EBOOT.BIN, which RPCS3 boots.
+    pub ps3_eboot: Option<PathBuf>,
 }
 
 /// Package metadata entries: param.sfo, icon0.png, param.json.
@@ -158,8 +160,46 @@ fn sce_sys_info(input: &Input) -> GameInfo {
     )
 }
 
+/// The folder of a dumped PS3 game inside `root`: `root/PS3_GAME` for a
+/// disc dump, or `root` itself for a PSN game. It holds PARAM.SFO and
+/// USRDIR/EBOOT.BIN.
+pub fn ps3_game_dir(root: &Path) -> Option<PathBuf> {
+    [root.join("PS3_GAME"), root.to_path_buf()]
+        .into_iter()
+        .find(|d| d.join("PARAM.SFO").is_file() && d.join("USRDIR").join("EBOOT.BIN").is_file())
+}
+
+/// Open a dumped PS3 game folder: its files, title and icon. Its EBOOT.BIN
+/// is a PS3 executable, so there is nothing to convert; RPCS3 runs it.
+fn load_ps3_folder(root: &Path, game: &Path) -> Result<Loaded> {
+    let files = walk_folder(root)?;
+    let read = |name: &str| {
+        let p = game.join(name);
+        let small = fs::metadata(&p).is_ok_and(|m| m.len() <= crate::meta::MAX_META_SIZE);
+        small.then(|| fs::read(&p).ok()).flatten()
+    };
+    let info = GameInfo::from_files(read("PARAM.SFO").as_deref(), None, read("ICON0.PNG").as_deref());
+    let rows = vec![
+        ("Format".to_string(), "PS3 game folder".to_string()),
+        ("Files".to_string(), files.iter().filter(|f| !f.is_dir).count().to_string()),
+        ("Size".to_string(), fmt_size(files.iter().map(|f| f.size).sum())),
+    ];
+    Ok(Loaded {
+        rows,
+        input: Some(Input::Folder(root.to_path_buf())),
+        files,
+        default_elf: None,
+        key_problem: None,
+        info,
+        ps3_eboot: Some(game.join("USRDIR").join("EBOOT.BIN")),
+    })
+}
+
 pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
     if path.is_dir() {
+        if let Some(game) = ps3_game_dir(path) {
+            return load_ps3_folder(path, &game);
+        }
         return load_folder(path);
     }
     let mut magic = [0u8; 4];
@@ -179,7 +219,7 @@ pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
         let pfs = match pkg.open_pfs(passcode) {
             Ok(p) => p,
             Err(e) if e.needs_key() => {
-                return Ok(Loaded { rows, input: None, files: Vec::new(), default_elf: None, key_problem: Some(e), info })
+                return Ok(Loaded { rows, input: None, files: Vec::new(), default_elf: None, key_problem: Some(e), info, ps3_eboot: None })
             }
             Err(e) => return Err(e),
         };
@@ -202,7 +242,7 @@ pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
         info.merge(sce_sys_info(&input));
         let default_elf = first_elf_candidate(&input, &files)?;
         rows.push(("Files".into(), files.iter().filter(|f| !f.is_dir).count().to_string()));
-        return Ok(Loaded { rows, input: Some(input), files, default_elf, key_problem: None, info });
+        return Ok(Loaded { rows, input: Some(input), files, default_elf, key_problem: None, info, ps3_eboot: None });
     }
 
     let head = magic.to_vec();
@@ -224,6 +264,7 @@ pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
         default_elf: None,
         key_problem: None,
         info: GameInfo::default(),
+        ps3_eboot: None,
     })
 }
 
@@ -252,7 +293,7 @@ fn load_folder(root: &Path) -> Result<Loaded> {
         other => other,
     };
     let info = sce_sys_info(&input);
-    Ok(Loaded { rows, input: Some(input), files, default_elf, key_problem: None, info })
+    Ok(Loaded { rows, input: Some(input), files, default_elf, key_problem: None, info, ps3_eboot: None })
 }
 
 /// Every entry under `root`, depth first and sorted, with `/`-separated paths.
