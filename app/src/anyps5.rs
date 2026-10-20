@@ -69,17 +69,16 @@ pub fn settings_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("pkgmaster-settings.ini"))
 }
 
-/// Most entries kept in the Recent list.
-pub const RECENT_LIMIT: usize = 10;
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     /// AnyPS5's release folder (the one holding libs/).
     pub anyps5_dir: Option<PathBuf>,
     /// The relinker, when it is not inside `anyps5_dir`.
     pub relinker: Option<PathBuf>,
-    /// Recently opened games, newest first.
-    pub recent: Vec<PathBuf>,
+    /// The AnyPS5 release installed by Download for me, such as `v0.1.3`.
+    pub anyps5_version: Option<String>,
+    /// The user's rpcs3.exe, for Run in RPCS3.
+    pub rpcs3: Option<PathBuf>,
     /// A PKG Master release the user chose to skip, such as `v0.1.4`.
     pub skip_version: Option<String>,
 }
@@ -98,7 +97,8 @@ impl Settings {
             match k.trim() {
                 "anyps5_dir" => s.anyps5_dir = Some(PathBuf::from(v)),
                 "relinker" => s.relinker = Some(PathBuf::from(v)),
-                "recent" if s.recent.len() < RECENT_LIMIT => s.recent.push(PathBuf::from(v)),
+                "anyps5_version" => s.anyps5_version = Some(v.to_string()),
+                "rpcs3" => s.rpcs3 = Some(PathBuf::from(v)),
                 "skip_version" => s.skip_version = Some(v.to_string()),
                 _ => {}
             }
@@ -120,9 +120,13 @@ impl Settings {
             text.push_str(&format!("relinker={}
 ", r.display()));
         }
-        for p in &self.recent {
-            text.push_str(&format!("recent={}
-", p.display()));
+        if let Some(v) = &self.anyps5_version {
+            text.push_str(&format!("anyps5_version={v}
+"));
+        }
+        if let Some(r) = &self.rpcs3 {
+            text.push_str(&format!("rpcs3={}
+", r.display()));
         }
         if let Some(v) = &self.skip_version {
             text.push_str(&format!("skip_version={v}
@@ -131,11 +135,14 @@ impl Settings {
         Ok(fs::write(path, text)?)
     }
 
-    /// Put `path` at the top of the Recent list.
-    pub fn remember(&mut self, path: &Path) {
-        self.recent.retain(|p| p != path);
-        self.recent.insert(0, path.to_path_buf());
-        self.recent.truncate(RECENT_LIMIT);
+    /// The installed AnyPS5 version: the one Download for me installed, or
+    /// the version in the relinker's file name. `None` when it can't be told.
+    pub fn installed_anyps5_version(&self) -> Option<String> {
+        if let Some(v) = &self.anyps5_version {
+            return Some(v.clone());
+        }
+        let (a, b, c) = relinker_version(&self.release().ok()?.relinker)?;
+        Some(format!("v{a}.{b}.{c}"))
     }
 
     /// The release these settings describe, if it is complete.
@@ -186,8 +193,15 @@ pub fn find_relinker(dir: &Path) -> Option<PathBuf> {
         .map(|e| e.path())
         .filter(|p| is_relinker_name(p))
         .collect();
-    found.sort();
+    // The newest version wins (relinker-v0.1.10 is newer than relinker-v0.1.9).
+    found.sort_by_key(|p| (relinker_version(p), p.clone()));
     found.pop()
+}
+
+/// The version in a relinker's file name, such as `relinker-v0.1.3.exe`.
+fn relinker_version(p: &Path) -> Option<(u64, u64, u64)> {
+    let name = p.file_stem()?.to_string_lossy().to_lowercase();
+    crate::update::parse_version(name.rsplit_once("-v")?.1)
 }
 
 fn is_relinker_name(p: &Path) -> bool {
@@ -227,12 +241,13 @@ pub const ANYPS5_RELEASES: &str = "https://github.com/boykopovar/AnyPS5/releases
 
 /// Only on the user's request: download the latest official AnyPS5 release
 /// (`prx-windows-v….zip` and `relinker-v….exe`) into `dest`, unpack it and
-/// put the relinker next to `libs/`. Returns the folder holding `libs/`.
+/// put the relinker next to `libs/`. Returns the folder holding `libs/` and
+/// the release's tag.
 pub fn install_release(
     dest: &Path,
     progress: crate::convert::Progress,
     cancel: &std::sync::atomic::AtomicBool,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, String)> {
     use crate::download::{download, latest_release, unzip};
 
     let release = latest_release(ANYPS5_REPO)?;
@@ -248,7 +263,7 @@ pub fn install_release(
 
     // A folder this download created is removed again if it fails or is cancelled.
     let fresh = !dest.exists();
-    let result = (|| -> Result<PathBuf> {
+    let result = (|| -> Result<(PathBuf, String)> {
         fs::create_dir_all(dest)?;
         let zip_path = dest.join(&zip_asset.name);
         download(&zip_asset, &zip_path, progress, cancel)?;
@@ -271,7 +286,7 @@ pub fn install_release(
             }
         };
         download(&relinker_asset, &home.join(&relinker_asset.name), progress, cancel)?;
-        Ok(home)
+        Ok((home, release.tag.clone()))
     })();
     if result.is_err() && fresh {
         let _ = fs::remove_dir_all(dest);
