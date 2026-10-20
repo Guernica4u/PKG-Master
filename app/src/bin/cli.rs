@@ -120,7 +120,7 @@ fn main() -> ExitCode {
                 };
                 let mut settings = Settings::load(&settings_path());
                 if let Some(d) = anyps5_dir {
-                    settings = Settings { anyps5_dir: Some(d.into()), relinker: None };
+                    settings = Settings { anyps5_dir: Some(d.into()), relinker: None, ..Default::default() };
                 }
                 if let Some(r) = relinker {
                     settings.relinker = Some(r.into());

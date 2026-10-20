@@ -180,9 +180,22 @@ fn settings_round_trip() {
     let s = Settings {
         anyps5_dir: Some(PathBuf::from(r"C:\Tools\prx-windows-v0.1.2")),
         relinker: Some(PathBuf::from(r"C:\Users\me\Downloads\relinker-v0.1.2.exe")),
+        recent: vec![PathBuf::from(r"D:\Games\PPSA01234"), PathBuf::from(r"D:\pkgs\game.pkg")],
+        skip_version: Some("v9.9.9".into()),
     };
     s.save(&path).unwrap();
     assert_eq!(Settings::load(&path), s);
+
+    // Recent keeps the newest first, without duplicates, up to the limit.
+    let mut r = Settings::default();
+    for i in 0..15 {
+        r.remember(&PathBuf::from(format!("game{i}")));
+    }
+    r.remember(&PathBuf::from("game12"));
+    assert_eq!(r.recent.len(), pkgmaster::anyps5::RECENT_LIMIT);
+    assert_eq!(r.recent[0], PathBuf::from("game12"));
+    assert_eq!(r.recent[1], PathBuf::from("game14"));
+    assert_eq!(r.recent.iter().filter(|p| p.as_path() == Path::new("game12")).count(), 1);
     let _ = fs::remove_dir_all(&tmp);
 }
 
@@ -245,7 +258,7 @@ fn find_release_checks_the_folder() {
     assert_eq!(r.relinker, tmp.join(RELINKER_NAME));
     // A remembered relinker that has since been deleted is not used.
     assert!(find_release(&tmp.join("prx-windows"), Some(&tmp.join("gone.exe"))).is_err());
-    let s = Settings { anyps5_dir: Some(tmp.join("prx-windows")), relinker: Some(tmp.join(RELINKER_NAME)) };
+    let s = Settings { anyps5_dir: Some(tmp.join("prx-windows")), relinker: Some(tmp.join(RELINKER_NAME)), ..Default::default() };
     assert_eq!(s.release().unwrap().relinker, tmp.join(RELINKER_NAME));
 
     // A relinker with no libs/ is not enough.
