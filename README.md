@@ -16,19 +16,26 @@ unzip it and run `pkgmaster-gui.exe`. Nothing to install.
 | Button | What happens |
 | --- | --- |
 | **Open file…** | Open a `.pkg`, or a single `eboot.bin` / `.prx` / `.sprx` / `.elf`. You can also drag a file onto the window or onto the `.exe`. |
-| **Open folder…** | Open a decrypted game folder (the one holding `eboot.bin` or `eboot.elf`, `sce_module/` and `sce_sys/`). Other folders are listed so you can click through them: a folder with a single `.pkg` opens it, and a folder with a single subfolder steps into it. |
-| **Run shadPKG (PS4)…** | Runs your own `shadpkg.exe` on a PS4 `.pkg` (see [shadPKG](#shadpkg)). |
-| **Recent** | The last 10 games you opened. They're also listed on the start screen. |
-| **Back / Refresh** | Go up one folder, or reload what's open. |
+| **Open folder…** | Open a decrypted game folder: a PS4/PS5 dump (the one holding `eboot.bin` or `eboot.elf`, `sce_module/` and `sce_sys/`) or a PS3 dump (with `PS3_GAME/` or `PARAM.SFO` and `USRDIR/`). Other folders are listed so you can click through them: a folder with a single `.pkg` opens it, and a folder with a single subfolder steps into it. |
+| **⬅ / ⟳** | Back to what you had open before (like a browser), or reload what's open. |
+| **Run shadPKG (PS4)…** | Shown for an open PS4 `.pkg`: runs your own `shadpkg.exe` on it (see [shadPKG](#shadpkg)). |
+| **📚 Library** | Your saved games as icon tiles. Press **☆** next to a game's title to save it; games you run in AnyPS5 or RPCS3 are added for you. Click a tile to play it (PS5 games with an AnyPS5 run folder start `app.exe`, PS3 games start in RPCS3) or open it; right-click for **Open game files**, **Show in Explorer** and **Remove from Library**. See [Library](#library). |
 | **History** | Everything the app has written, with **Revert** and **Show in Explorer**. See [History](#history). |
 | **Convert to ELF…** | Turns the selected file (by default `eboot.bin`) from Sony's SELF format into a standard ELF64, which is the file type AnyPS5 needs. Saves into a new `<name>-elf` folder next to the game files by default. |
-| **Extract all files…** | Unpacks everything inside a `.pkg` into a normal folder. |
-| **Run in AnyPS5…** | For a decrypted PS5 game folder: converts the executables, runs your AnyPS5 relinker, and sets up a ready-to-run folder inside your AnyPS5 folder. **Launch** then starts it, and **Copy log** copies everything it printed. Hidden for PS4 games, which AnyPS5 can't run. |
+| **Extract all files…** | Shown for an unlocked `.pkg`: unpacks everything inside it into a normal folder. |
+| **Run in AnyPS5…** | For a decrypted PS5 game folder: converts the executables, runs your AnyPS5 relinker, and sets up a ready-to-run folder inside your AnyPS5 folder. **Launch** then starts it, and **Copy log** copies everything it printed. Hidden for PS4 and PS3 games, which AnyPS5 can't run. |
+| **Run in RPCS3** | For a dumped PS3 game folder: starts it in your own [RPCS3](#rpcs3). |
 | **Passcode** | Only shown for encrypted fake/debug packages. Usually 32 zeros. |
 
 **Right-click** any file in a list for **Convert to ELF**, **Show in
 Explorer**, **Copy path** and **Delete** (which moves it to the Recycle Bin).
 Files inside a `.pkg` are read-only, so those only get Convert and Copy path.
+
+### Library
+
+Saved games live in `%APPDATA%\PKG Master\library.json`, with a small copy of
+each icon in `library-icons\`. The log under the buttons folds away when you
+open a different game, and it can't be dragged over the Run / Launch buttons.
 
 ### Updates
 
@@ -69,6 +76,22 @@ To set it up by hand instead:
 
 PS4 games (`CUSA…`) aren't supported by AnyPS5, so the AnyPS5 buttons are
 hidden for them. AnyPS5 is early software and only a few games work so far.
+
+When AnyPS5 puts out a newer release than the one you have, an **Update AnyPS5**
+button appears under the AnyPS5 row. It downloads the new release into a new
+folder next to your current one (your old run folders stay where they are) and
+switches to it.
+
+### RPCS3
+
+PS3 discs are encrypted with a key for each disc, so PKG Master works from
+games you dumped on your own PS3 (custom firmware copies them off the disc
+already decrypted). Open the dumped folder and press **Run in RPCS3**: PKG
+Master starts your [RPCS3](https://rpcs3.net) with `--no-gui` on the game's
+`USRDIR/EBOOT.BIN`. RPCS3 isn't included; the first time, the app asks you to
+pick your `rpcs3.exe` (or put RPCS3 in an `rpcs3` folder next to
+`pkgmaster-gui.exe`). Convert to ELF isn't available for PS3 games; RPCS3 runs
+them as they are.
 
 ### shadPKG
 

@@ -48,7 +48,8 @@ If Windows says "Windows protected your PC", click More info, then Run anyway
   (https://github.com/seregonwar/ShadPKG/releases) and drop it in the
   shadpkg folder next to this file.
 - History: undo anything the app wrote.
-- Recent: the games you opened lately.
+- Library: star games to save them; play them from the Library button.
+- Run in RPCS3: plays a PS3 game you dumped, with your own RPCS3 (https://rpcs3.net).
 - Updates: when a new version is out, the app offers to update itself.
 - Shows the game's title, title ID, version and icon when you open it.
 
