@@ -183,6 +183,8 @@ fn settings_round_trip() {
         skip_version: Some("v9.9.9".into()),
         anyps5_version: Some("v0.1.3".into()),
         rpcs3: Some(PathBuf::from(r"D:\Emulators\RPCS3\rpcs3.exe")),
+        library_autostart: true,
+        hide_log: true,
     };
     s.save(&path).unwrap();
     assert_eq!(Settings::load(&path), s);

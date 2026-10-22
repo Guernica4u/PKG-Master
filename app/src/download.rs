@@ -147,6 +147,24 @@ pub fn download(asset: &Asset, dest: &Path, progress: Progress, cancel: &AtomicB
 /// The message a cancelled download fails with.
 pub const CANCELLED: &str = "Download cancelled.";
 
+/// Unpack a `.7z` archive into `dest`. Entries that would land outside
+/// `dest` are refused. Setting `cancel` stops it between files.
+pub fn un7z(archive: &Path, dest: &Path, progress: Progress, cancel: &AtomicBool) -> Result<()> {
+    let mut n = 0u64;
+    let result = sevenz_rust2::decompress_file_with_extract_fn(archive, dest, |entry, reader, path| {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(sevenz_rust2::Error::Other(CANCELLED.into()));
+        }
+        n += 1;
+        progress(n, 0, &format!("Unpacking {}", entry.name()));
+        sevenz_rust2::default_entry_extract_fn(entry, reader, path)
+    });
+    result.map_err(|e| match e {
+        sevenz_rust2::Error::Other(m) if m == CANCELLED => Error::Conversion(CANCELLED.into()),
+        other => Error::Conversion(format!("{} could not be unpacked: {other}", archive.display())),
+    })
+}
+
 /// Unpack `zip` into `dest`. Entries that would land outside `dest` are
 /// refused. Setting `cancel` stops it between files.
 pub fn unzip(zip: &Path, dest: &Path, progress: Progress, cancel: &AtomicBool) -> Result<()> {
