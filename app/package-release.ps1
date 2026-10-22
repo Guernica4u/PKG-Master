@@ -28,7 +28,9 @@ try {
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 if (Test-Path $zip) { Remove-Item $zip -Force }
 New-Item -ItemType Directory -Force (Join-Path $stage "shadpkg") | Out-Null
-Copy-Item "$app\target\release\pkgmaster-gui.exe", "$app\target\release\pkgmaster-cli.exe" $stage
+# CARGO_TARGET_DIR builds elsewhere (useful while target\release\pkgmaster-gui.exe is running).
+$target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "$app\target" }
+Copy-Item "$target\release\pkgmaster-gui.exe", "$target\release\pkgmaster-cli.exe" $stage
 
 @"
 PKG Master v$version
