@@ -2157,7 +2157,9 @@ impl eframe::App for App {
                 }
                 // ☰ at the far right: Settings, the data folder and About.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.menu_button(RichText::new(ICON_MENU).size(18.0), |ui| {
+                    // No frame or background, just the three lines.
+                    let burger = egui::Button::new(RichText::new(ICON_MENU).size(18.0)).frame(false);
+                    egui::menu::menu_custom_button(ui, burger, |ui| {
                         if ui.button("Settings…").clicked() {
                             self.show_settings = true;
                             ui.close_menu();
