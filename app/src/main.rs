@@ -50,7 +50,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let mut app = App::new();
-            app.check_for_update(&cc.egui_ctx);
+            app.check_for_update(&cc.egui_ctx, false);
             if let Some(path) = initial {
                 app.start_load(&cc.egui_ctx, path);
             }
@@ -85,7 +85,41 @@ enum Msg {
     /// The relinker finished; the runtime folder is ready to launch.
     Relinked(Result<PathBuf, Error>),
     /// The launched game exited.
-    Exited(String),
+    Exited(GameEnd),
+    /// RPCS3's Download for me finished: its rpcs3.exe, or why not.
+    Rpcs3Installed(Result<PathBuf, Error>),
+    /// Check for updates found nothing newer.
+    UpToDate,
+}
+
+/// How a launched game (or RPCS3) ended.
+struct GameEnd {
+    /// "app.exe" or "RPCS3".
+    name: String,
+    /// Exit code, when the process ran and ended.
+    code: Option<i32>,
+    /// Why it couldn't be watched, when it couldn't.
+    lost: Option<String>,
+    /// Seconds it ran for.
+    secs: f64,
+    /// Started from an AnyPS5 run folder.
+    anyps5: bool,
+}
+
+/// A failure that soon after Launch counts as a crash on boot.
+const BOOT_CRASH_SECS: f64 = 15.0;
+
+/// One line in the log panel.
+struct LogLine {
+    text: String,
+    tone: Tone,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tone {
+    Plain,
+    Warn,
+    Bad,
 }
 
 /// Most log lines kept in the window.
@@ -111,9 +145,12 @@ struct App {
     /// Warnings shown before a run: (warnings, game folder, run folder).
     /// The run starts once the user continues.
     confirm: Option<(Vec<String>, PathBuf, PathBuf)>,
-    /// The last laid-out AnyPS5 runtime folder.
-    run_dir: Option<PathBuf>,
-    log: Vec<String>,
+    log: Vec<LogLine>,
+    /// The ☰ menu's Settings and About windows.
+    show_settings: bool,
+    show_about: bool,
+    /// Explain how to install the PS3 system software in RPCS3.
+    show_ps3_firmware: bool,
     /// The launched game, while it runs.
     game: Arc<Mutex<Option<Child>>>,
     /// The listing of an opened folder that is not itself a game.
@@ -198,8 +235,10 @@ impl App {
             rx,
             settings: Settings::load(&settings_path()),
             confirm: None,
-            run_dir: None,
             log: Vec::new(),
+            show_settings: false,
+            show_about: false,
+            show_ps3_firmware: false,
             game: Arc::new(Mutex::new(None)),
             browse: None,
             history: Arc::new(Mutex::new(History::load(&settings_path().with_file_name("history.tsv")))),
@@ -454,7 +493,7 @@ impl App {
         };
         let hist = self.history.clone();
         self.log.clear();
-        self.run_dir = None;
+        self.log_open = true;
         self.busy = true;
         self.progress = Some((0, 0, String::new()));
         self.status = Status::Info("Preparing and running the AnyPS5 relinker…".into());
@@ -477,23 +516,52 @@ impl App {
         });
     }
 
+    /// The AnyPS5 run folder of the game that is open: the one the Library
+    /// remembers for it, or `<AnyPS5 folder>\<game folder>-run`. Only a
+    /// folder with an app.exe counts.
+    fn open_game_run_dir(&self) -> Option<PathBuf> {
+        let game = self.path.as_deref().filter(|p| p.is_dir() && ps3_game_dir(p).is_none())?;
+        let remembered = self.library.get(game).and_then(|e| e.run_dir.clone());
+        let usual = self
+            .settings
+            .anyps5_dir
+            .as_ref()
+            .zip(game.file_name())
+            .map(|(dir, name)| dir.join(format!("{}-run", name.to_string_lossy())));
+        [remembered, usual].into_iter().flatten().find(|d| d.join(APP_EXE).is_file())
+    }
+
+    /// Start the open game's app.exe.
     fn launch(&mut self, ctx: &egui::Context) {
-        let Some(dir) = self.run_dir.clone() else { return };
+        let Some(dir) = self.open_game_run_dir() else {
+            self.status = Status::Err("This game hasn't been run in AnyPS5 yet.".into());
+            return;
+        };
         let child = match launch_command(&dir).and_then(spawn_piped) {
             Ok(c) => c,
             Err(e) => {
-                self.status = Status::Err(describe_error(&e));
+                let msg = format!("App failed to start: {}", describe_error(&e));
+                self.push_log(msg.clone(), Tone::Bad);
+                self.status = Status::Err(msg);
                 return;
             }
         };
-        self.log.push(format!("> {APP_EXE} (in {})", dir.display()));
-        self.watch_game(ctx, child, APP_EXE.to_string());
+        self.push_log(format!("> {APP_EXE} (in {})", dir.display()), Tone::Plain);
+        self.watch_game(ctx, child, APP_EXE.to_string(), true);
+    }
+
+    fn push_log(&mut self, text: String, tone: Tone) {
+        self.log.push(LogLine { text, tone });
+        if self.log.len() > LOG_LIMIT {
+            self.log.drain(..self.log.len() - LOG_LIMIT);
+        }
     }
 
     /// Stream a started game's output into the log, keep it for Stop, and
-    /// report when it exits.
-    fn watch_game(&mut self, ctx: &egui::Context, mut child: Child, name: String) {
+    /// report how it ended.
+    fn watch_game(&mut self, ctx: &egui::Context, mut child: Child, name: String, anyps5: bool) {
         self.log_open = true;
+        let started = std::time::Instant::now();
         let out = child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>);
         let err = child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>);
         for pipe in [out, err].into_iter().flatten() {
@@ -512,13 +580,14 @@ impl App {
             thread::sleep(Duration::from_millis(200));
             let mut guard = game.lock().unwrap();
             let Some(child) = guard.as_mut() else { break };
-            let msg = match child.try_wait() {
+            let (code, lost) = match child.try_wait() {
                 Ok(None) => continue,
-                Ok(Some(status)) => format!("{name} exited ({status})."),
-                Err(e) => format!("Lost track of {name}: {e}"),
+                Ok(Some(status)) => (Some(status.code().unwrap_or(-1)), None),
+                Err(e) => (None, Some(e.to_string())),
             };
             *guard = None;
-            let _ = tx.send(Msg::Exited(msg));
+            let end = GameEnd { name: name.clone(), code, lost, secs: started.elapsed().as_secs_f64(), anyps5 };
+            let _ = tx.send(Msg::Exited(end));
             ctx.request_repaint();
             break;
         });
@@ -534,6 +603,11 @@ impl App {
             self.rpcs3_missing = true;
             return;
         };
+        // RPCS3 can't boot anything until the PS3 system software is installed.
+        if !pkgmaster::rpcs3::has_system_software(&rpcs3) {
+            self.show_ps3_firmware = true;
+            return;
+        }
         let mut cmd = std::process::Command::new(&rpcs3);
         cmd.arg("--no-gui").arg(&eboot);
         if let Some(dir) = rpcs3.parent() {
@@ -542,33 +616,34 @@ impl App {
         let child = match spawn_piped(cmd) {
             Ok(c) => c,
             Err(e) => {
-                self.status = Status::Err(format!("Could not start RPCS3: {}", describe_error(&e)));
+                let msg = format!("RPCS3 failed to start: {}", describe_error(&e));
+                self.push_log(msg.clone(), Tone::Bad);
+                self.status = Status::Err(msg);
                 return;
             }
         };
-        self.log.push(format!("> rpcs3 --no-gui {}", eboot.display()));
+        self.push_log(format!("> rpcs3 --no-gui {}", eboot.display()), Tone::Plain);
         if let Some(l) = self.loaded.as_ref().filter(|_| self.path.as_deref() == Some(game)) {
             self.library.add(game, &l.info, None);
             let _ = self.library.save();
         }
-        self.watch_game(ctx, child, "RPCS3".to_string());
+        self.watch_game(ctx, child, "RPCS3".to_string(), false);
     }
 
-    /// Start a Library game: a PS3 game boots in RPCS3, a game with an AnyPS5
-    /// run folder starts its app.exe, and anything else just opens.
+    /// Open a Library game. With "Start games from the Library" on, it also
+    /// starts: a PS3 game in RPCS3, a game with an AnyPS5 run folder its app.exe.
     fn boot(&mut self, ctx: &egui::Context, e: &Entry) {
         if !e.path.exists() {
             self.status = Status::Err(format!("{} isn't there any more.", e.path.display()));
             return;
         }
         self.start_load(ctx, e.path.clone());
-        if self.game_running() {
+        if !self.settings.library_autostart || self.game_running() {
             return;
         }
         if e.is_ps3() || ps3_game_dir(&e.path).is_some() {
             self.run_rpcs3(ctx, &e.path);
-        } else if let Some(dir) = e.run_dir.clone().filter(|d| d.join(APP_EXE).is_file()) {
-            self.run_dir = Some(dir);
+        } else if self.open_game_run_dir().is_some() {
             self.launch(ctx);
         }
     }
@@ -652,13 +727,7 @@ impl App {
                                     Status::Err("This package is encrypted.".into())
                                 }
                                 Some(e) => Status::Err(format!("That passcode didn't work: {e}")),
-                                None => match &l.input {
-                                    Some(Input::Package(_) | Input::Folder(_)) => Status::Ok(format!(
-                                        "Opened {}. Pick a file below or use the defaults.",
-                                        file_label(&path)
-                                    )),
-                                    _ => Status::Ok(format!("Opened {}.", file_label(&path))),
-                                },
+                                None => Status::Ok(format!("Opened {}.", file_label(&path))),
                             };
                             self.selected = l.default_elf.clone();
                             self.loaded = Some(l);
@@ -669,25 +738,18 @@ impl App {
                     }
                 }
                 Msg::Progress(done, total, item) => self.progress = Some((done, total, item)),
-                Msg::Log(line) => {
-                    self.log.push(line);
-                    if self.log.len() > LOG_LIMIT {
-                        self.log.drain(..self.log.len() - LOG_LIMIT);
-                    }
-                }
+                Msg::Log(line) => self.push_log(line, Tone::Plain),
                 Msg::Relinked(result) => {
                     self.busy = false;
                     self.progress = None;
                     self.status = match result {
                         Ok(dir) => {
-                            let msg = format!("Ready in {}. Press Launch to start {APP_EXE}. Added to your Library.", dir.display());
                             // Running a game in AnyPS5 puts it in the Library, with its run folder.
                             if let (Some(game), Some(l)) = (self.path.clone(), self.loaded.as_ref()) {
-                                self.library.add(&game, &l.info, Some(dir.clone()));
+                                self.library.add(&game, &l.info, Some(dir));
                                 let _ = self.library.save();
                             }
-                            self.run_dir = Some(dir);
-                            Status::Ok(msg)
+                            Status::Ok("Ready to launch.".into())
                         }
                         Err(e) => Status::Err(describe_error(&e)),
                     };
@@ -706,7 +768,7 @@ impl App {
                         Ok(exe) => match std::process::Command::new(&exe).spawn() {
                             Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                             Err(e) => {
-                                self.status = Status::Ok(format!("Updated. Start PKG Master again to use the new version ({e})."))
+                                self.status = Status::Ok(format!("Updated; start PKG Master again to use the new version ({e})."))
                             }
                         },
                         Err(e) => self.status = download_status(&e),
@@ -734,9 +796,50 @@ impl App {
                         Err(e) => download_status(&e),
                     };
                 }
-                Msg::Exited(m) => {
-                    self.log.push(m.clone());
-                    self.status = Status::Info(m);
+                Msg::Exited(end) => {
+                    let game = if end.name == "RPCS3" { "RPCS3" } else { "Game" };
+                    match (end.code, end.lost) {
+                        // A normal close folds the log away.
+                        (Some(0), _) => {
+                            let msg = format!("{game} closed.");
+                            self.push_log(msg.clone(), Tone::Plain);
+                            self.status = Status::Info(msg);
+                            self.log_open = false;
+                        }
+                        (Some(code), _) => {
+                            let msg = format!("{game} crashed (exit code {code}).");
+                            self.push_log(msg.clone(), Tone::Bad);
+                            if end.anyps5 && end.secs < BOOT_CRASH_SECS {
+                                self.push_log("⚠ This game may not be supported by AnyPS5.".into(), Tone::Warn);
+                                self.status = Status::Err("Game crashed on boot: this game may not be supported by AnyPS5.".into());
+                            } else {
+                                self.status = Status::Err(msg);
+                            }
+                        }
+                        (None, lost) => {
+                            let msg = format!("{game} failed: {}", lost.unwrap_or_default());
+                            self.push_log(msg.clone(), Tone::Bad);
+                            self.status = Status::Err(msg);
+                        }
+                    }
+                }
+                Msg::UpToDate => self.status = Status::Ok("PKG Master is up to date.".into()),
+                Msg::Rpcs3Installed(result) => {
+                    self.busy = false;
+                    self.cancellable = false;
+                    self.progress = None;
+                    match result {
+                        Ok(exe) => {
+                            self.settings.rpcs3 = Some(exe.clone());
+                            self.status = match self.settings.save(&settings_path()) {
+                                Ok(()) => Status::Ok(format!("RPCS3 is set up in {}.", exe.parent().unwrap_or(&exe).display())),
+                                Err(e) => Status::Err(format!("RPCS3 downloaded, but the setting could not be saved: {}", describe_error(&e))),
+                            };
+                            // Next it needs the PS3 system software.
+                            self.show_ps3_firmware = !pkgmaster::rpcs3::has_system_software(&exe);
+                        }
+                        Err(e) => self.status = download_status(&e),
+                    }
                 }
                 Msg::Done(result) => {
                     if self.refresh_after_job {
@@ -841,7 +944,7 @@ impl App {
                 let dest = dir.join(SHADPKG_NAMES[0]);
                 let copied = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&file, &dest));
                 self.status = match copied {
-                    Ok(_) => Status::Ok(format!("Copied shadPKG.exe into {}. Press Run shadPKG (PS4) again.", dir.display())),
+                    Ok(_) => Status::Ok(format!("Copied shadPKG.exe into {}.", dir.display())),
                     Err(e) => Status::Err(format!("Could not copy it into {}: {e}", dir.display())),
                 };
                 close = true;
@@ -905,7 +1008,9 @@ impl App {
                     let galley = ui.painter().layout(e.title.clone(), egui::FontId::proportional(13.0), color, TILE.x - 12.0);
                     let text_pos = egui::pos2(rect.center().x - galley.size().x / 2.0, icon_rect.bottom() + 6.0);
                     ui.painter().with_clip_rect(rect).galley(text_pos, galley, color);
-                    let what = if e.is_ps3() {
+                    let what = if !self.settings.library_autostart {
+                        "Click to open"
+                    } else if e.is_ps3() {
                         "Click to play in RPCS3"
                     } else if e.run_dir.as_ref().is_some_and(|d| d.join(APP_EXE).is_file()) {
                         "Click to play (AnyPS5)"
@@ -982,17 +1087,28 @@ impl App {
 
     /// Look for a newer PKG Master in the background (skipped when
     /// `PKGMASTER_NO_UPDATE_CHECK` is set). A failed check is silent.
-    fn check_for_update(&self, ctx: &egui::Context) {
-        if std::env::var_os("PKGMASTER_NO_UPDATE_CHECK").is_some() {
+    /// Look for newer PKG Master and AnyPS5 releases. `manual` (About's
+    /// Check for updates) also says when there is nothing newer.
+    fn check_for_update(&self, ctx: &egui::Context, manual: bool) {
+        if !manual && std::env::var_os("PKGMASTER_NO_UPDATE_CHECK").is_some() {
             return;
         }
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         let anyps5 = self.settings.installed_anyps5_version();
         thread::spawn(move || {
-            if let Ok(Some(release)) = update::check() {
-                let _ = tx.send(Msg::UpdateFound(release));
-                ctx.request_repaint();
+            match update::check() {
+                Ok(Some(release)) => {
+                    let _ = tx.send(Msg::UpdateFound(release));
+                }
+                Ok(None) if manual => {
+                    let _ = tx.send(Msg::UpToDate);
+                }
+                Err(e) if manual => {
+                    let _ = tx.send(Msg::Done(Err(e)));
+                }
+                _ => {}
             }
+            ctx.request_repaint();
             // AnyPS5 changes often; say when a newer one is out.
             if let Some(installed) = anyps5 {
                 if let Ok(r) = pkgmaster::download::latest_release(ANYPS5_REPO) {
@@ -1028,43 +1144,215 @@ impl App {
         if !self.rpcs3_missing {
             return;
         }
-        let (mut close, mut pick) = (false, false);
+        let dest = rpcs3_download_dir();
+        let (mut close, mut pick, mut download) = (false, false, false);
         egui::Window::new("RPCS3 isn't set up")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.set_max_width(480.0);
-                ui.label("Run in RPCS3 plays PS3 games with RPCS3, the PS3 emulator. It isn't included with PKG Master.");
+                ui.label("Run in RPCS3 plays PS3 games with RPCS3, the PS3 emulator, which isn't included with PKG Master.");
+                ui.add_space(6.0);
+                ui.label(RichText::new("Download for me").strong());
+                ui.weak(format!("Gets the official RPCS3 build (about 40 MB) into {}", dest.display()));
                 ui.add_space(4.0);
-                ui.label("1. Download RPCS3 from its official site and unzip it:");
-                if ui.link(RPCS3_DOWNLOAD).clicked() {
-                    open_url(RPCS3_DOWNLOAD);
-                }
-                ui.label("2. Start it once and install the PS3 system software, as its quickstart guide explains.");
-                ui.label("3. Press \"I have it, pick rpcs3.exe…\" below.");
-                ui.add_space(8.0);
+                ui.label(RichText::new("Or get it yourself").strong());
                 ui.horizontal(|ui| {
-                    pick = ui.button("I have it, pick rpcs3.exe…").clicked();
-                    if ui.button("Open download page").clicked() {
+                    ui.label("Download and unzip it from");
+                    if ui.link(RPCS3_DOWNLOAD).clicked() {
                         open_url(RPCS3_DOWNLOAD);
                     }
-                    close = ui.button("Close").clicked();
+                    ui.label(", then pick its rpcs3.exe.");
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    download = ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Download for me").strong())).clicked();
+                    pick = ui.button("I have it, pick rpcs3.exe…").clicked();
+                    close = ui.button("Not now").clicked();
                 });
             });
-        if pick {
-            if let Some(file) = rfd::FileDialog::new().set_title("Pick rpcs3.exe").add_filter("Program", &["exe"]).pick_file() {
-                self.settings.rpcs3 = Some(file);
-                self.status = match self.settings.save(&settings_path()) {
-                    Ok(()) => Status::Ok("RPCS3 saved. Press Run in RPCS3 again.".into()),
-                    Err(e) => Status::Err(format!("RPCS3 set, but it could not be saved: {}", describe_error(&e))),
-                };
-                close = true;
-            }
+        if pick && self.pick_rpcs3() {
+            close = true;
+        }
+        if download {
+            self.status = Status::Info("Downloading RPCS3 from its GitHub releases…".into());
+            self.spawn_download(ctx, move |progress, cancel| {
+                Msg::Rpcs3Installed(pkgmaster::rpcs3::install(&dest, progress, cancel))
+            });
+            close = true;
         }
         if close {
             self.rpcs3_missing = false;
         }
+    }
+
+    /// Ask for rpcs3.exe and remember it.
+    fn pick_rpcs3(&mut self) -> bool {
+        let Some(file) = rfd::FileDialog::new().set_title("Pick rpcs3.exe").add_filter("Program", &["exe"]).pick_file() else {
+            return false;
+        };
+        self.settings.rpcs3 = Some(file.clone());
+        self.status = match self.settings.save(&settings_path()) {
+            Ok(()) => Status::Ok("RPCS3 saved.".into()),
+            Err(e) => Status::Err(format!("RPCS3 set, but it could not be saved: {}", describe_error(&e))),
+        };
+        self.show_ps3_firmware = !pkgmaster::rpcs3::has_system_software(&file);
+        true
+    }
+
+    /// How to install the PS3 system software, which RPCS3 needs before it
+    /// can boot anything.
+    fn ps3_firmware_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_ps3_firmware {
+            return;
+        }
+        let rpcs3 = find_rpcs3(&self.settings);
+        let mut close = false;
+        egui::Window::new("RPCS3 needs the PS3 system software")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(480.0);
+                ui.label("1. Download the PS3 system software (PS3UPDAT.PUP), free from PlayStation's site:");
+                if ui.link(PS3_SYSTEM_SOFTWARE).clicked() {
+                    open_url(PS3_SYSTEM_SOFTWARE);
+                }
+                ui.add_space(4.0);
+                ui.label("2. Open RPCS3, choose File > Install Firmware, and pick PS3UPDAT.PUP.");
+                ui.label("3. Close RPCS3 and press Run in RPCS3 again.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Open PlayStation's page").clicked() {
+                        open_url(PS3_SYSTEM_SOFTWARE);
+                    }
+                    if ui.add_enabled(rpcs3.is_some(), egui::Button::new("Open RPCS3")).clicked() {
+                        if let Some(exe) = &rpcs3 {
+                            let mut cmd = std::process::Command::new(exe);
+                            if let Some(dir) = exe.parent() {
+                                cmd.current_dir(dir);
+                            }
+                            if let Err(e) = cmd.spawn() {
+                                self.status = Status::Err(format!("RPCS3 failed to start: {e}"));
+                            }
+                        }
+                    }
+                    close = ui.button("Done").clicked();
+                });
+            });
+        if close {
+            self.show_ps3_firmware = false;
+        }
+    }
+
+    /// The ☰ menu's Settings window.
+    fn settings_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        let mut changed = false;
+        let (mut pick_anyps5, mut pick_rpcs3, mut get_rpcs3) = (false, false, false);
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(520.0);
+                changed |= ui.checkbox(&mut self.settings.library_autostart, "Start games when you open them from the Library").changed();
+                changed |= ui.checkbox(&mut self.settings.hide_log, "Hide the log").changed();
+                ui.add_space(8.0);
+                ui.strong("Program locations");
+                egui::Grid::new("locations").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
+                    // Long paths are cut short; hovering shows all of it.
+                    let path_label = |ui: &mut egui::Ui, p: Option<PathBuf>| match p {
+                        Some(p) => {
+                            ui.scope(|ui| {
+                                ui.set_max_width(260.0);
+                                ui.add(egui::Label::new(RichText::new(p.display().to_string()).monospace()).truncate())
+                                    .on_hover_text(p.display().to_string());
+                            });
+                        }
+                        None => {
+                            ui.weak("Not set");
+                        }
+                    };
+                    ui.label("AnyPS5");
+                    path_label(ui, self.settings.anyps5_dir.clone());
+                    pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("Change…")).clicked();
+                    ui.end_row();
+
+                    ui.label("RPCS3");
+                    let rpcs3 = find_rpcs3(&self.settings);
+                    let missing = rpcs3.is_none();
+                    path_label(ui, rpcs3);
+                    ui.horizontal(|ui| {
+                        pick_rpcs3 = ui.add_enabled(!self.busy, egui::Button::new("Change…")).clicked();
+                        if missing {
+                            get_rpcs3 = ui.add_enabled(!self.busy, egui::Button::new("Download…")).clicked();
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("shadPKG");
+                    path_label(ui, find_shadpkg());
+                    if ui.button("Open its folder").clicked() {
+                        let dir = shadpkg_dir();
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                    }
+                    ui.end_row();
+                });
+            });
+        if changed {
+            if let Err(e) = self.settings.save(&settings_path()) {
+                self.status = Status::Err(format!("Settings could not be saved: {}", describe_error(&e)));
+            }
+        }
+        if pick_anyps5 {
+            if self.settings.anyps5_dir.is_none() {
+                self.anyps5_missing = true;
+            } else {
+                self.pick_anyps5();
+            }
+        }
+        if pick_rpcs3 {
+            self.pick_rpcs3();
+        }
+        if get_rpcs3 {
+            self.rpcs3_missing = true;
+        }
+        self.show_settings = open;
+    }
+
+    /// The ☰ menu's About window.
+    fn about_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_about {
+            return;
+        }
+        let mut open = true;
+        let mut check = false;
+        egui::Window::new("About PKG Master")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(RichText::new(format!("PKG Master v{}", update::current_version())).size(18.0).strong());
+                ui.label("For PS4, PS5 and PS3 games you dumped yourself. No Sony keys included.");
+                if ui.link(PROJECT_PAGE).clicked() {
+                    open_url(PROJECT_PAGE);
+                }
+                ui.add_space(8.0);
+                check = ui.add_enabled(!self.busy, egui::Button::new("Check for updates")).clicked();
+            });
+        if check {
+            self.status = Status::Info("Checking for updates…".into());
+            self.check_for_update(ctx, true);
+        }
+        self.show_about = open;
     }
 
     /// "PKG Master vX is out", with Update now.
@@ -1511,7 +1799,9 @@ fn find_shadpkg() -> Option<PathBuf> {
     None
 }
 
-const RPCS3_DOWNLOAD: &str = "https://rpcs3.net/download";
+use pkgmaster::rpcs3::{PS3_SYSTEM_SOFTWARE, RPCS3_DOWNLOAD};
+
+const PROJECT_PAGE: &str = "https://github.com/Guernica4u/PKG-Master";
 
 /// The user's rpcs3.exe: the one they picked, `PKGMASTER_RPCS3`, or an
 /// `rpcs3\rpcs3.exe` next to this app.
@@ -1535,16 +1825,26 @@ enum LibraryAction {
 /// written to (such as Program Files). Worked out once.
 fn anyps5_download_dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| {
-        let beside_app = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("AnyPS5")));
-        if let Some(dir) = beside_app.filter(|d| d.parent().is_some_and(can_write)) {
-            return dir;
-        }
-        std::env::var_os("LOCALAPPDATA")
-            .map(|d| Path::new(&d).join("PKG Master").join("AnyPS5"))
-            .unwrap_or_else(|| PathBuf::from("AnyPS5"))
-    })
-    .clone()
+    DIR.get_or_init(|| beside_app_or_local("AnyPS5")).clone()
+}
+
+/// Where RPCS3's "Download for me" puts it: `rpcs3\` next to this app (where
+/// Run in RPCS3 also looks), or `%LOCALAPPDATA%\PKG Master\rpcs3`.
+fn rpcs3_download_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| beside_app_or_local("rpcs3")).clone()
+}
+
+/// A `name` folder next to this app, or in `%LOCALAPPDATA%\PKG Master` when
+/// the app's folder can't be written to (such as Program Files).
+fn beside_app_or_local(name: &str) -> PathBuf {
+    let beside_app = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(name)));
+    if let Some(dir) = beside_app.filter(|d| d.parent().is_some_and(can_write)) {
+        return dir;
+    }
+    std::env::var_os("LOCALAPPDATA")
+        .map(|d| Path::new(&d).join("PKG Master").join(name))
+        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 /// Whether a file can be created in `dir`.
@@ -1736,7 +2036,7 @@ impl eframe::App for App {
             }
         }
 
-        if !self.log.is_empty() {
+        if !self.log.is_empty() && !self.settings.hide_log {
             // The log can be dragged taller, but never over the Run / Launch rows.
             let room = match self.actions_bottom {
                 Some(bottom) => status_top - bottom - 6.0,
@@ -1756,7 +2056,8 @@ impl eframe::App for App {
                     let now = ui.ctx().input(|i| i.time);
                     let copied = app.copied_at.is_some_and(|t| now - t < 1.5);
                     if ui.small_button(if copied { "Copied!" } else { "Copy log" }).on_hover_text("Copy every line to the clipboard").clicked() {
-                        ui.ctx().copy_text(app.log.join("\n"));
+                        let text: Vec<&str> = app.log.iter().map(|l| l.text.as_str()).collect();
+                        ui.ctx().copy_text(text.join("\n"));
                         app.copied_at = Some(now);
                         ui.ctx().request_repaint_after(Duration::from_millis(1600));
                     }
@@ -1772,7 +2073,12 @@ impl eframe::App for App {
                         header(ui, self);
                         egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
                             for line in &self.log {
-                                ui.label(RichText::new(line).monospace().size(12.0));
+                                let text = RichText::new(&line.text).monospace().size(12.0);
+                                ui.label(match line.tone {
+                                    Tone::Plain => text,
+                                    Tone::Warn => text.color(Color32::from_rgb(0xC8, 0x8A, 0x10)),
+                                    Tone::Bad => text.color(Color32::from_rgb(0xD0, 0x3B, 0x3B)),
+                                });
                             }
                         });
                     });
@@ -1849,6 +2155,27 @@ impl eframe::App for App {
                 if self.busy {
                     ui.spinner();
                 }
+                // ☰ at the far right: Settings, the data folder and About.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button(RichText::new(ICON_MENU).size(18.0), |ui| {
+                        if ui.button("Settings…").clicked() {
+                            self.show_settings = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Open data folder").on_hover_text("Settings, History and the Library live here").clicked() {
+                            if let Some(dir) = settings_path().parent() {
+                                let _ = std::fs::create_dir_all(dir);
+                                let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                            }
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("About PKG Master").clicked() {
+                            self.show_about = true;
+                            ui.close_menu();
+                        }
+                    });
+                });
             });
             match &self.path {
                 Some(p) => ui.label(RichText::new(p.display().to_string()).monospace()),
@@ -1862,6 +2189,9 @@ impl eframe::App for App {
         self.shadpkg_missing_ui(ctx);
         self.anyps5_missing_ui(ctx);
         self.rpcs3_missing_ui(ctx);
+        self.ps3_firmware_ui(ctx);
+        self.settings_ui(ctx);
+        self.about_ui(ctx);
         self.update_ui(ctx);
 
         self.actions_bottom = None;
@@ -2051,7 +2381,8 @@ impl eframe::App for App {
                         )
                         .on_disabled_hover_text("Needs a decrypted game folder (Open folder…).")
                         .clicked();
-                    let can_launch = !self.busy && !running && self.run_dir.is_some();
+                    // Launch belongs to the open game: its own run folder, if it has one.
+                    let can_launch = !self.busy && !running && self.open_game_run_dir().is_some();
                     do_launch = ui.add_enabled(can_launch, egui::Button::new(RichText::new("Launch").size(15.0))).clicked();
                     if running {
                         do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
@@ -2095,13 +2426,6 @@ impl eframe::App for App {
 
             if has_files && !loaded.files.is_empty() {
                 ui.add_space(8.0);
-                ui.label(if ps3 {
-                    "Files in the folder:"
-                } else if is_package {
-                    "Files in the package (click one to choose what gets converted):"
-                } else {
-                    "Files in the folder (click one to choose what gets converted):"
-                });
                 let files: Vec<_> = loaded.files.iter().filter(|f| !f.is_dir).collect();
                 let folder_root = match &loaded.input {
                     Some(Input::Folder(r)) => Some(r.clone()),
@@ -2193,3 +2517,4 @@ const ICON_REFRESH: &str = "⟳";
 const ICON_STAR: &str = "☆";
 const ICON_STARRED: &str = "★";
 const ICON_LIBRARY: &str = "📚";
+const ICON_MENU: &str = "☰";
