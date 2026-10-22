@@ -81,6 +81,10 @@ pub struct Settings {
     pub rpcs3: Option<PathBuf>,
     /// A PKG Master release the user chose to skip, such as `v0.1.4`.
     pub skip_version: Option<String>,
+    /// Clicking a Library game also starts it (AnyPS5 or RPCS3).
+    pub library_autostart: bool,
+    /// Hide the log panel under the buttons.
+    pub hide_log: bool,
 }
 
 impl Settings {
@@ -99,6 +103,8 @@ impl Settings {
                 "relinker" => s.relinker = Some(PathBuf::from(v)),
                 "anyps5_version" => s.anyps5_version = Some(v.to_string()),
                 "rpcs3" => s.rpcs3 = Some(PathBuf::from(v)),
+                "library_autostart" => s.library_autostart = v == "1",
+                "hide_log" => s.hide_log = v == "1",
                 "skip_version" => s.skip_version = Some(v.to_string()),
                 _ => {}
             }
@@ -110,29 +116,21 @@ impl Settings {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let mut text = String::from("# PKG Master settings
-");
-        if let Some(d) = &self.anyps5_dir {
-            text.push_str(&format!("anyps5_dir={}
-", d.display()));
-        }
-        if let Some(r) = &self.relinker {
-            text.push_str(&format!("relinker={}
-", r.display()));
-        }
-        if let Some(v) = &self.anyps5_version {
-            text.push_str(&format!("anyps5_version={v}
-"));
-        }
-        if let Some(r) = &self.rpcs3 {
-            text.push_str(&format!("rpcs3={}
-", r.display()));
-        }
-        if let Some(v) = &self.skip_version {
-            text.push_str(&format!("skip_version={v}
-"));
-        }
-        Ok(fs::write(path, text)?)
+        let mut lines = vec!["# PKG Master settings".to_string()];
+        let mut put = |key: &str, value: Option<String>| {
+            if let Some(v) = value {
+                lines.push(format!("{key}={v}"));
+            }
+        };
+        put("anyps5_dir", self.anyps5_dir.as_ref().map(|d| d.display().to_string()));
+        put("relinker", self.relinker.as_ref().map(|r| r.display().to_string()));
+        put("anyps5_version", self.anyps5_version.clone());
+        put("rpcs3", self.rpcs3.as_ref().map(|r| r.display().to_string()));
+        put("skip_version", self.skip_version.clone());
+        put("library_autostart", self.library_autostart.then(|| "1".to_string()));
+        put("hide_log", self.hide_log.then(|| "1".to_string()));
+        lines.push(String::new());
+        Ok(fs::write(path, lines.join("\n"))?)
     }
 
     /// The installed AnyPS5 version: the one Download for me installed, or

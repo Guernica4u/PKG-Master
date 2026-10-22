@@ -18,6 +18,7 @@ pub mod library;
 pub mod meta;
 pub mod pfs;
 pub mod pkg;
+pub mod rpcs3;
 pub mod update;
 
 pub use error::{Error, Result};

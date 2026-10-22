@@ -19,12 +19,13 @@ unzip it and run `pkgmaster-gui.exe`. Nothing to install.
 | **Open folder…** | Open a decrypted game folder: a PS4/PS5 dump (the one holding `eboot.bin` or `eboot.elf`, `sce_module/` and `sce_sys/`) or a PS3 dump (with `PS3_GAME/` or `PARAM.SFO` and `USRDIR/`). Other folders are listed so you can click through them: a folder with a single `.pkg` opens it, and a folder with a single subfolder steps into it. |
 | **⬅ / ⟳** | Back to what you had open before (like a browser), or reload what's open. |
 | **Run shadPKG (PS4)…** | Shown for an open PS4 `.pkg`: runs your own `shadpkg.exe` on it (see [shadPKG](#shadpkg)). |
-| **📚 Library** | Your saved games as icon tiles. Press **☆** next to a game's title to save it; games you run in AnyPS5 or RPCS3 are added for you. Click a tile to play it (PS5 games with an AnyPS5 run folder start `app.exe`, PS3 games start in RPCS3) or open it; right-click for **Open game files**, **Show in Explorer** and **Remove from Library**. See [Library](#library). |
+| **📚 Library** | Your saved games as icon tiles. Press **☆** next to a game's title to save it; games you run in AnyPS5 or RPCS3 are added for you. Click a tile to open the game (with **Start games when you open them from the Library** on in ☰ Settings, it also starts: PS5 games with an AnyPS5 run folder run `app.exe`, PS3 games start in RPCS3); right-click for **Open game files**, **Show in Explorer** and **Remove from Library**. See [Library](#library). |
 | **History** | Everything the app has written, with **Revert** and **Show in Explorer**. See [History](#history). |
 | **Convert to ELF…** | Turns the selected file (by default `eboot.bin`) from Sony's SELF format into a standard ELF64, which is the file type AnyPS5 needs. Saves into a new `<name>-elf` folder next to the game files by default. |
 | **Extract all files…** | Shown for an unlocked `.pkg`: unpacks everything inside it into a normal folder. |
-| **Run in AnyPS5…** | For a decrypted PS5 game folder: converts the executables, runs your AnyPS5 relinker, and sets up a ready-to-run folder inside your AnyPS5 folder. **Launch** then starts it, and **Copy log** copies everything it printed. Hidden for PS4 and PS3 games, which AnyPS5 can't run. |
+| **Run in AnyPS5…** | For a decrypted PS5 game folder: converts the executables, runs your AnyPS5 relinker, and sets up a ready-to-run folder inside your AnyPS5 folder. **Launch** then starts the open game's own run folder, and **Copy log** copies everything it printed. If the game closes, the log folds away; if it crashes, the crash shows in red, with a warning when it happens within 15 seconds (the game may not be supported by AnyPS5). Hidden for PS4 and PS3 games, which AnyPS5 can't run. |
 | **Run in RPCS3** | For a dumped PS3 game folder: starts it in your own [RPCS3](#rpcs3). |
+| **☰** | **Settings…** (start games from the Library, hide the log, and where AnyPS5, RPCS3 and shadPKG are), **Open data folder** and **About PKG Master** (version and Check for updates). |
 | **Passcode** | Only shown for encrypted fake/debug packages. Usually 32 zeros. |
 
 **Right-click** any file in a list for **Convert to ELF**, **Show in
@@ -88,10 +89,16 @@ PS3 discs are encrypted with a key for each disc, so PKG Master works from
 games you dumped on your own PS3 (custom firmware copies them off the disc
 already decrypted). Open the dumped folder and press **Run in RPCS3**: PKG
 Master starts your [RPCS3](https://rpcs3.net) with `--no-gui` on the game's
-`USRDIR/EBOOT.BIN`. RPCS3 isn't included; the first time, the app asks you to
-pick your `rpcs3.exe` (or put RPCS3 in an `rpcs3` folder next to
-`pkgmaster-gui.exe`). Convert to ELF isn't available for PS3 games; RPCS3 runs
-them as they are.
+`USRDIR/EBOOT.BIN`. RPCS3 isn't included. The first time, PKG Master offers
+**Download for me**, which gets RPCS3's official Windows build from its GitHub
+releases (checked against GitHub's SHA-256) into an `rpcs3` folder next to
+`pkgmaster-gui.exe`, or you can pick a `rpcs3.exe` you already have.
+
+RPCS3 also needs the PS3 system software, which PlayStation gives away on its
+[PS3 system software page](https://www.playstation.com/en-us/support/hardware/ps3/system-software/).
+PKG Master explains the steps when it's missing: download `PS3UPDAT.PUP`, then
+in RPCS3 choose **File > Install Firmware**. Convert to ELF isn't available for
+PS3 games; RPCS3 runs them as they are.
 
 ### shadPKG
 

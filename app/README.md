@@ -18,6 +18,7 @@ python ../app/tests/parity.py  # needs the Python package installed; Rust vs Pyt
 | `src/download.rs` | GitHub release lookups, downloads (SHA-256 checked, cancellable) and unzipping |
 | `src/update.rs` | update check and Update now |
 | `src/library.rs` | the Library (saved games and their icons) |
+| `src/rpcs3.rs` | RPCS3 Download for me and the PS3 system software check |
 | `src/history.rs` | the History record, backups and Revert |
 | `src/pkg.rs`, `src/pfs.rs`, `src/crypto.rs` | PS4/PS5 containers, the PFS filesystem, XTS decryption |
 | `src/elf.rs` | ELF parsing and SELF → ELF rebuilding |
