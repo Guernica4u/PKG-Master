@@ -185,6 +185,8 @@ fn settings_round_trip() {
         rpcs3: Some(PathBuf::from(r"D:\Emulators\RPCS3\rpcs3.exe")),
         library_autostart: true,
         hide_log: true,
+        window_pos: Some((12.0, -40.0)),
+        window_size: Some((1024.0, 700.0)),
     };
     s.save(&path).unwrap();
     assert_eq!(Settings::load(&path), s);

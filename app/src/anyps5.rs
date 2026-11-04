@@ -85,6 +85,10 @@ pub struct Settings {
     pub library_autostart: bool,
     /// Hide the log panel under the buttons.
     pub hide_log: bool,
+    /// The main window's outer position in points, saved when it closes.
+    pub window_pos: Option<(f32, f32)>,
+    /// The main window's inner size in points, saved when it closes.
+    pub window_size: Option<(f32, f32)>,
 }
 
 impl Settings {
@@ -106,6 +110,8 @@ impl Settings {
                 "library_autostart" => s.library_autostart = v == "1",
                 "hide_log" => s.hide_log = v == "1",
                 "skip_version" => s.skip_version = Some(v.to_string()),
+                "window_pos" => s.window_pos = parse_pair(v),
+                "window_size" => s.window_size = parse_pair(v),
                 _ => {}
             }
         }
@@ -129,6 +135,8 @@ impl Settings {
         put("skip_version", self.skip_version.clone());
         put("library_autostart", self.library_autostart.then(|| "1".to_string()));
         put("hide_log", self.hide_log.then(|| "1".to_string()));
+        put("window_pos", self.window_pos.map(|(x, y)| format!("{x},{y}")));
+        put("window_size", self.window_size.map(|(w, h)| format!("{w},{h}")));
         lines.push(String::new());
         Ok(fs::write(path, lines.join("\n"))?)
     }
@@ -155,6 +163,12 @@ impl Settings {
 
 // --------------------------------------------------------------------------
 // The user's AnyPS5 release
+
+/// A `x,y` pair as written to the settings file.
+fn parse_pair(v: &str) -> Option<(f32, f32)> {
+    let (a, b) = v.split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
 
 #[derive(Clone, Debug)]
 pub struct Release {
