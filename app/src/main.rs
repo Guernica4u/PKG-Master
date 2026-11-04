@@ -21,7 +21,8 @@ use pkgmaster::anyps5::{
 };
 use pkgmaster::binary::fmt_size;
 use pkgmaster::convert::{
-    convert_to_elf, default_output_name, extract_all, load, ps3_game_dir, Input, Loaded,
+    convert_to_elf_cancellable, default_output_name, extract_all_cancellable, load, ps3_game_dir, Input, Loaded,
+    JOB_CANCELLED,
 };
 use pkgmaster::download::{Release, CANCELLED};
 use pkgmaster::history::{ago, History};
@@ -33,15 +34,18 @@ const PACKAGE_EXTS: [&str; 1] = ["pkg"];
 const BINARY_EXTS: [&str; 5] = ["bin", "self", "sprx", "prx", "elf"];
 
 fn main() -> eframe::Result {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("PKG Master")
-            .with_inner_size([760.0, 560.0])
-            .with_min_inner_size([520.0, 400.0])
-            .with_drag_and_drop(true)
-            .with_icon(window_icon()),
-        ..Default::default()
-    };
+    let settings = Settings::load(&settings_path());
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("PKG Master")
+        .with_inner_size(settings.window_size.map(|(w, h)| [w, h]).unwrap_or([760.0, 560.0]))
+        .with_min_inner_size([520.0, 400.0])
+        .with_drag_and_drop(true)
+        .with_icon(window_icon());
+    // Put it back where it was, unless that spot is gone.
+    if let Some((x, y)) = settings.window_pos {
+        viewport = viewport.with_position([x, y]);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     update::clean_up_old_files();
     // A file passed on the command line (or dropped onto the .exe) opens at start.
     let initial = std::env::args_os().nth(1).map(PathBuf::from);
@@ -49,7 +53,7 @@ fn main() -> eframe::Result {
         "PKG Master",
         options,
         Box::new(move |cc| {
-            let mut app = App::new();
+            let mut app = App::new(settings);
             app.check_for_update(&cc.egui_ctx, false);
             if let Some(path) = initial {
                 app.start_load(&cc.egui_ctx, path);
@@ -124,6 +128,8 @@ enum Tone {
 
 /// Most log lines kept in the window.
 const LOG_LIMIT: usize = 5000;
+/// Estimated height of one History row, for the virtualised list.
+const HISTORY_ROW: f32 = 104.0;
 
 enum Status {
     Info(String),
@@ -199,6 +205,21 @@ struct App {
     rpcs3_missing: bool,
     /// A newer AnyPS5 than the installed one (its tag).
     anyps5_update: Option<String>,
+    /// Filesystem answers the window asks for every frame, cached per change.
+    paths: PathCache,
+    /// The saved window position has been checked against the monitor once.
+    window_checked: bool,
+}
+
+/// Filesystem answers the toolbar asks for every frame. Each is worked out
+/// once and forgotten when a setting, or the open game, changes.
+#[derive(Default)]
+struct PathCache {
+    rpcs3_exe: Option<Option<PathBuf>>,
+    anyps5_release: Option<Option<pkgmaster::anyps5::Release>>,
+    run_dir: Option<Option<PathBuf>>,
+    /// Whether a run folder has an app.exe, checked once per folder.
+    run_ready: HashMap<PathBuf, bool>,
 }
 
 /// Something picked from a file's right-click menu.
@@ -221,7 +242,7 @@ struct BrowseRow {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(settings: Settings) -> Self {
         let (tx, rx) = channel();
         App {
             path: None,
@@ -230,10 +251,10 @@ impl App {
             selected: None,
             busy: false,
             progress: None,
-            status: Status::Info("Open a .pkg file, or drag one onto this window.".into()),
+            status: Status::Info(String::new()),
             tx,
             rx,
-            settings: Settings::load(&settings_path()),
+            settings,
             confirm: None,
             log: Vec::new(),
             show_settings: false,
@@ -265,6 +286,8 @@ impl App {
             actions_bottom: None,
             rpcs3_missing: false,
             anyps5_update: None,
+            paths: PathCache::default(),
+            window_checked: false,
         }
     }
 
@@ -282,6 +305,7 @@ impl App {
     /// subfolder is stepped into; anything else is listed like the file view.
     /// Back and Refresh pass `auto = false` so they show the folder itself.
     fn open(&mut self, ctx: &egui::Context, path: PathBuf, auto: bool) {
+        self.clear_path_cache();
         // Something new: remember what was open for Back, and fold the log away.
         if let Some(prev) = self.path.clone().filter(|p| *p != path) {
             if self.back_stack.last() != Some(&prev) {
@@ -333,19 +357,21 @@ impl App {
         });
     }
 
-    fn spawn_job<F>(&mut self, ctx: &egui::Context, job: F)
+    fn spawn_job<F>(&mut self, ctx: &egui::Context, cancellable: bool, job: F)
     where
-        F: FnOnce(&dyn Fn(u64, u64, &str)) -> Result<String, Error> + Send + 'static,
+        F: FnOnce(&dyn Fn(u64, u64, &str), &AtomicBool) -> Result<String, Error> + Send + 'static,
     {
         self.busy = true;
+        self.cancellable = cancellable;
+        self.cancel.store(false, Ordering::Relaxed);
         self.progress = Some((0, 0, String::new()));
-        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        let (tx, ctx, cancel) = (self.tx.clone(), ctx.clone(), self.cancel.clone());
         thread::spawn(move || {
             let report = |done: u64, total: u64, item: &str| {
                 let _ = tx.send(Msg::Progress(done, total, item.to_string()));
                 ctx.request_repaint();
             };
-            let result = job(&report);
+            let result = job(&report, &cancel);
             let _ = tx.send(Msg::Done(result));
             ctx.request_repaint();
         });
@@ -384,8 +410,10 @@ impl App {
         let Some(out) = out else { return };
         self.status = Status::Info("Converting…".into());
         let (hist, action) = (self.history.clone(), format!("Converted {source_name} to ELF"));
-        self.spawn_job(ctx, move |progress| {
-            let r = tracked(&hist, &action, &out, || convert_to_elf(&input, inner.as_deref(), &out, progress))?;
+        self.spawn_job(ctx, true, move |progress, cancel| {
+            let r = tracked(&hist, &action, &out, || {
+                convert_to_elf_cancellable(&input, inner.as_deref(), &out, progress, cancel)
+            })?;
             let mut msg = format!(
                 "Saved {} ({}) from {}: {} / {}, entry 0x{:X}.",
                 file_label(&r.output),
@@ -419,8 +447,8 @@ impl App {
         let out = dir.join(stem);
         self.status = Status::Info("Extracting…".into());
         let (hist, action) = (self.history.clone(), format!("Extracted {}", out.display()));
-        self.spawn_job(ctx, move |progress| {
-            let n = tracked(&hist, &action, &out, || extract_all(&pfs, &out, progress))?;
+        self.spawn_job(ctx, true, move |progress, cancel| {
+            let n = tracked(&hist, &action, &out, || extract_all_cancellable(&pfs, &out, progress, cancel))?;
             Ok(format!("Extracted {n} file(s) to {}.", out.display()))
         });
     }
@@ -457,6 +485,7 @@ impl App {
         };
         self.settings.anyps5_dir = Some(dir);
         self.settings.relinker = relinker;
+        self.clear_path_cache();
         self.status = match self.settings.save(&settings_path()) {
             Ok(()) => Status::Ok("AnyPS5 folder saved.".into()),
             Err(e) => Status::Err(format!("AnyPS5 folder set, but it could not be saved: {}", describe_error(&e))),
@@ -529,6 +558,29 @@ impl App {
             .zip(game.file_name())
             .map(|(dir, name)| dir.join(format!("{}-run", name.to_string_lossy())));
         [remembered, usual].into_iter().flatten().find(|d| d.join(APP_EXE).is_file())
+    }
+
+    /// Filesystem answers the toolbar uses, worked out once per change.
+    fn refresh_path_cache(&mut self) {
+        if self.paths.rpcs3_exe.is_none() {
+            self.paths.rpcs3_exe = Some(find_rpcs3(&self.settings));
+        }
+        if self.paths.anyps5_release.is_none() {
+            self.paths.anyps5_release = Some(self.settings.release().ok());
+        }
+        if self.paths.run_dir.is_none() {
+            self.paths.run_dir = Some(self.open_game_run_dir());
+        }
+    }
+
+    /// Forget the cached paths (a setting or the open game changed).
+    fn clear_path_cache(&mut self) {
+        self.paths = PathCache::default();
+    }
+
+    /// Whether `dir` holds an app.exe; each run folder is checked once.
+    fn run_dir_ready(&mut self, dir: &Path) -> bool {
+        *self.paths.run_ready.entry(dir.to_path_buf()).or_insert_with(|| dir.join(APP_EXE).is_file())
     }
 
     /// Start the open game's app.exe.
@@ -704,10 +756,10 @@ impl App {
         let out = out.join(stem);
         let (hist, action) = (self.history.clone(), format!("shadPKG extracted {}", file_label(&pkg)));
         self.status = Status::Info(format!("Running shadPKG on {}…", file_label(&pkg)));
-        self.spawn_job(ctx, move |progress| {
+        self.spawn_job(ctx, true, move |progress, cancel| {
             tracked(&hist, &action, &out, || {
                 std::fs::create_dir_all(&out)?;
-                shadpkg_extract(&exe, &pkg, &out, progress)
+                shadpkg_extract(&exe, &pkg, &out, progress, cancel)
             })
         });
     }
@@ -749,6 +801,7 @@ impl App {
                                 self.library.add(&game, &l.info, Some(dir));
                                 let _ = self.library.save();
                             }
+                            self.clear_path_cache();
                             Status::Ok("Ready to launch.".into())
                         }
                         Err(e) => Status::Err(describe_error(&e)),
@@ -784,6 +837,7 @@ impl App {
                             self.settings.relinker = None;
                             self.settings.anyps5_version = Some(tag);
                             self.anyps5_update = None;
+                            self.clear_path_cache();
                             match self.settings.save(&settings_path()) {
                                 Ok(()) => Status::Ok(format!("AnyPS5 is set up in {}.", dir.display())),
                                 Err(e) => Status::Err(format!(
@@ -831,6 +885,7 @@ impl App {
                     match result {
                         Ok(exe) => {
                             self.settings.rpcs3 = Some(exe.clone());
+                            self.clear_path_cache();
                             self.status = match self.settings.save(&settings_path()) {
                                 Ok(()) => Status::Ok(format!("RPCS3 is set up in {}.", exe.parent().unwrap_or(&exe).display())),
                                 Err(e) => Status::Err(format!("RPCS3 downloaded, but the setting could not be saved: {}", describe_error(&e))),
@@ -847,9 +902,11 @@ impl App {
                         self.pending_refresh = true;
                     }
                     self.busy = false;
+                    self.cancellable = false;
                     self.progress = None;
                     self.status = match result {
                         Ok(m) => Status::Ok(m),
+                        Err(Error::Conversion(m)) if m == JOB_CANCELLED => Status::Info(m),
                         Err(e) => Status::Err(describe_error(&e)),
                     };
                 }
@@ -1012,7 +1069,7 @@ impl App {
                         "Click to open"
                     } else if e.is_ps3() {
                         "Click to play in RPCS3"
-                    } else if e.run_dir.as_ref().is_some_and(|d| d.join(APP_EXE).is_file()) {
+                    } else if e.run_dir.as_deref().is_some_and(|d| self.run_dir_ready(d)) {
                         "Click to play (AnyPS5)"
                     } else {
                         "Click to open"
@@ -1193,6 +1250,7 @@ impl App {
             return false;
         };
         self.settings.rpcs3 = Some(file.clone());
+        self.clear_path_cache();
         self.status = match self.settings.save(&settings_path()) {
             Ok(()) => Status::Ok("RPCS3 saved.".into()),
             Err(e) => Status::Err(format!("RPCS3 set, but it could not be saved: {}", describe_error(&e))),
@@ -1307,6 +1365,7 @@ impl App {
                 });
             });
         if changed {
+            self.clear_path_cache();
             if let Err(e) = self.settings.save(&settings_path()) {
                 self.status = Status::Err(format!("Settings could not be saved: {}", describe_error(&e)));
             }
@@ -1327,6 +1386,30 @@ impl App {
         self.show_settings = open;
     }
 
+    /// Save the window's place and size for the next launch.
+    fn remember_window(&mut self, ctx: &egui::Context) {
+        let viewport = ctx.input(|i| i.viewport().clone());
+        if let Some(outer) = viewport.outer_rect {
+            self.settings.window_pos = Some((outer.min.x, outer.min.y));
+        }
+        if let Some(inner) = viewport.inner_rect {
+            self.settings.window_size = Some((inner.width(), inner.height()));
+        }
+        if self.settings.window_pos.is_some() || self.settings.window_size.is_some() {
+            let _ = self.settings.save(&settings_path());
+        }
+    }
+
+    /// A window restored past the edge of the screen comes back where it can be grabbed.
+    fn keep_window_on_screen(&mut self, ctx: &egui::Context) {
+        let Some((x, y)) = self.settings.window_pos else { return };
+        let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) else { return };
+        let reachable = y >= 0.0 && y < monitor.y - 40.0 && x < monitor.x - 80.0;
+        if !reachable {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(40.0, 40.0)));
+        }
+    }
+
     /// The ☰ menu's About window.
     fn about_ui(&mut self, ctx: &egui::Context) {
         if !self.show_about {
@@ -1341,7 +1424,8 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.label(RichText::new(format!("PKG Master v{}", update::current_version())).size(18.0).strong());
-                ui.label("For PS4, PS5 and PS3 games you dumped yourself. No Sony keys included.");
+                ui.set_max_width(450.0);
+                ui.label(ABOUT_DESCRIPTION);
                 if ui.link(PROJECT_PAGE).clicked() {
                     open_url(PROJECT_PAGE);
                 }
@@ -1493,7 +1577,7 @@ impl App {
                 self.delete_confirm = None;
                 self.refresh_after_job = true;
                 self.status = Status::Info(format!("Moving {} to the Recycle Bin…", file_label(&p)));
-                self.spawn_job(ctx, move |_| {
+                self.spawn_job(ctx, false, move |_, _| {
                     trash::delete(&p).map_err(|e| {
                         Error::Conversion(format!("could not move {} to the Recycle Bin: {e}", p.display()))
                     })?;
@@ -1523,19 +1607,28 @@ impl App {
                 if h.changes.is_empty() {
                     ui.weak("Nothing yet.");
                 }
-                egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(ui.available_height() - 36.0).show(
+                // Only the visible rows are laid out; the history grows over time.
+                egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(ui.available_height() - 36.0).show_rows(
                     ui,
-                    |ui| {
-                        for c in h.changes.iter().rev() {
+                    HISTORY_ROW,
+                    h.changes.len(),
+                    |ui, range| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                        for i in range {
+                            let c = &h.changes[h.changes.len() - 1 - i];
                             ui.group(|ui| {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.strong(&c.action);
                                     ui.weak(ago(c.time));
                                 });
-                                ui.label(RichText::new(c.target.display().to_string()).monospace().size(11.0));
+                                let path = c.target.display().to_string();
+                                ui.label(RichText::new(&path).monospace().size(11.0)).on_hover_text(path.clone());
                                 if c.backup.is_some() {
                                     ui.weak("Replaced something that was already there (kept a backup).");
+                                } else {
+                                    // Keep every row the same height for the virtual scrollbar.
+                                    ui.add_space(ui.text_style_height(&egui::TextStyle::Body));
                                 }
                                 ui.horizontal(|ui| {
                                     if c.reverted {
@@ -1598,7 +1691,7 @@ impl App {
                     self.revert_confirm = None;
                     let hist = self.history.clone();
                     self.status = Status::Info("Reverting…".into());
-                    self.spawn_job(ctx, move |_| hist.lock().unwrap_or_else(|e| e.into_inner()).revert(id));
+                    self.spawn_job(ctx, false, move |_, _| hist.lock().unwrap_or_else(|e| e.into_inner()).revert(id));
                 }
                 Some(false) => self.revert_confirm = None,
                 None => {}
@@ -1628,7 +1721,7 @@ impl App {
                 Some(true) => {
                     self.clear_confirm = false;
                     let hist = self.history.clone();
-                    self.spawn_job(ctx, move |_| {
+                    self.spawn_job(ctx, false, move |_, _| {
                         hist.lock().unwrap_or_else(|e| e.into_inner()).clear()?;
                         Ok("History cleared and backups deleted.".into())
                     });
@@ -1803,6 +1896,11 @@ use pkgmaster::rpcs3::{PS3_SYSTEM_SOFTWARE, RPCS3_DOWNLOAD};
 
 const PROJECT_PAGE: &str = "https://github.com/Guernica4u/PKG-Master";
 
+/// What About says: the GitHub repository description, word for word.
+const ABOUT_DESCRIPTION: &str = "A tool for PS4/PS5 games that lets you seamlessly convert files \
+    (for example eboot.bin → eboot.elf), making it easier to use them with AnyPS5 and other projects \
+    without having to worry about encryption with ShadPKG (ShadPS4 support soon).";
+
 /// The user's rpcs3.exe: the one they picked, `PKGMASTER_RPCS3`, or an
 /// `rpcs3\rpcs3.exe` next to this app.
 fn find_rpcs3(settings: &Settings) -> Option<PathBuf> {
@@ -1885,7 +1983,13 @@ fn open_url(url: &str) {
     let _ = std::process::Command::new("explorer").arg(url).spawn();
 }
 
-fn shadpkg_extract(exe: &Path, pkg: &Path, out: &Path, progress: &dyn Fn(u64, u64, &str)) -> Result<String, Error> {
+fn shadpkg_extract(
+    exe: &Path,
+    pkg: &Path,
+    out: &Path,
+    progress: &dyn Fn(u64, u64, &str),
+    cancel: &AtomicBool,
+) -> Result<String, Error> {
     use std::io::Read;
     use std::process::{Command, Stdio};
 
@@ -1913,35 +2017,57 @@ fn shadpkg_extract(exe: &Path, pkg: &Path, out: &Path, progress: &dyn Fn(u64, u6
         s
     });
 
-    // Show each stdout line (shadPKG redraws progress with '\r') as it arrives.
+    // Read stdout on its own thread (shadPKG redraws progress with '\r'), so
+    // this thread can watch for Cancel while the extraction runs.
     let mut stdout = child.stdout.take().expect("piped stdout");
-    let mut lines: Vec<String> = Vec::new();
-    let mut current = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = stdout.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        for &b in &buf[..n] {
-            if b == b'\n' || b == b'\r' {
-                let line = String::from_utf8_lossy(&current).trim().to_string();
-                current.clear();
-                if !line.is_empty() {
-                    progress(0, 0, &line);
-                    lines.push(line);
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+    let reader = thread::spawn(move || {
+        let mut lines: Vec<String> = Vec::new();
+        let mut current = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    for &b in &buf[..n] {
+                        if b == b'\n' || b == b'\r' {
+                            let line = String::from_utf8_lossy(&current).trim().to_string();
+                            current.clear();
+                            if !line.is_empty() {
+                                let _ = line_tx.send(line.clone());
+                                lines.push(line);
+                            }
+                        } else {
+                            current.push(b);
+                        }
+                    }
                 }
-            } else {
-                current.push(b);
             }
         }
-    }
-    let tail = String::from_utf8_lossy(&current).trim().to_string();
-    if !tail.is_empty() {
-        lines.push(tail);
-    }
+        let tail = String::from_utf8_lossy(&current).trim().to_string();
+        if !tail.is_empty() {
+            let _ = line_tx.send(tail.clone());
+            lines.push(tail);
+        }
+        lines
+    });
 
-    let status = child.wait()?;
+    let status = loop {
+        while let Ok(line) = line_rx.try_recv() {
+            progress(0, 0, &line);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(Error::Conversion(JOB_CANCELLED.into()));
+        }
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    let lines = reader.join().unwrap_or_default();
     let err_text = err_reader.join().unwrap_or_default();
     let last: Vec<&str> = lines.iter().rev().take(3).rev().map(String::as_str).collect();
     if status.success() {
@@ -1963,7 +2089,19 @@ fn describe_error(e: &Error) -> String {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.remember_window(ctx);
+        }
+        if !self.window_checked {
+            self.window_checked = true;
+            self.keep_window_on_screen(ctx);
+        }
         self.handle_messages(ctx);
+        self.refresh_path_cache();
+        // The toolbar only needs these; doing the disk work here keeps frames cheap.
+        let rpcs3_exe = self.paths.rpcs3_exe.clone().flatten();
+        let anyps5_release = self.paths.anyps5_release.clone().flatten();
+        let run_dir = self.paths.run_dir.clone().flatten();
         self.update_game_header(ctx);
         if std::mem::take(&mut self.pending_refresh) {
             if let Some(p) = self.path.clone() {
@@ -1978,29 +2116,34 @@ impl eframe::App for App {
             }
         }
 
-        let status_top = egui::TopBottomPanel::bottom("status")
-            .show(ctx, |ui| {
-                ui.add_space(6.0);
-                if let Some((done, total, item)) = &self.progress {
-                    let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
-                    ui.horizontal(|ui| {
-                        if self.cancellable && self.busy && ui.button("Cancel").clicked() {
-                            self.cancel.store(true, Ordering::Relaxed);
-                        }
-                        ui.add(egui::ProgressBar::new(frac).show_percentage().text(item.as_str()));
-                    });
-                }
-                let (text, color) = match &self.status {
-                    Status::Info(m) => (m.as_str(), ui.visuals().text_color()),
-                    Status::Ok(m) => (m.as_str(), Color32::from_rgb(0x2E, 0xA0, 0x43)),
-                    Status::Err(m) => (m.as_str(), Color32::from_rgb(0xD0, 0x3B, 0x3B)),
-                };
-                ui.label(RichText::new(text).color(color));
-                ui.add_space(6.0);
-            })
-            .response
-            .rect
-            .top();
+        // The status strip only takes up room when it has something to say.
+        let quiet = self.progress.is_none() && matches!(&self.status, Status::Info(m) if m.is_empty());
+        let mut status_top = ctx.screen_rect().bottom();
+        if !quiet {
+            status_top = egui::TopBottomPanel::bottom("status")
+                .show(ctx, |ui| {
+                    ui.add_space(6.0);
+                    if let Some((done, total, item)) = &self.progress {
+                        let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
+                        ui.horizontal(|ui| {
+                            if self.cancellable && self.busy && ui.button("Cancel").clicked() {
+                                self.cancel.store(true, Ordering::Relaxed);
+                            }
+                            ui.add(egui::ProgressBar::new(frac).show_percentage().text(item.as_str()));
+                        });
+                    }
+                    let (text, color) = match &self.status {
+                        Status::Info(m) => (m.as_str(), ui.visuals().text_color()),
+                        Status::Ok(m) => (m.as_str(), Color32::from_rgb(0x2E, 0xA0, 0x43)),
+                        Status::Err(m) => (m.as_str(), Color32::from_rgb(0xD0, 0x3B, 0x3B)),
+                    };
+                    ui.label(RichText::new(text).color(color));
+                    ui.add_space(6.0);
+                })
+                .response
+                .rect
+                .top();
+        }
 
         if let Some((warnings, root, out)) = self.confirm.clone() {
             let mut decision = None;
@@ -2071,16 +2214,25 @@ impl eframe::App for App {
                     .max_height(room.max(60.0))
                     .show(ctx, |ui| {
                         header(ui, self);
-                        egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-                            for line in &self.log {
-                                let text = RichText::new(&line.text).monospace().size(12.0);
-                                ui.label(match line.tone {
-                                    Tone::Plain => text,
-                                    Tone::Warn => text.color(Color32::from_rgb(0xC8, 0x8A, 0x10)),
-                                    Tone::Bad => text.color(Color32::from_rgb(0xD0, 0x3B, 0x3B)),
-                                });
-                            }
-                        });
+                        // Only the visible lines are laid out; a game can log thousands.
+                        let row_h = ui.fonts(|f| f.row_height(&egui::FontId::monospace(12.0)));
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show_rows(
+                            ui,
+                            row_h,
+                            self.log.len(),
+                            |ui, range| {
+                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                                for line in &self.log[range] {
+                                    let text = RichText::new(&line.text).monospace().size(12.0);
+                                    ui.label(match line.tone {
+                                        Tone::Plain => text,
+                                        Tone::Warn => text.color(Color32::from_rgb(0xC8, 0x8A, 0x10)),
+                                        Tone::Bad => text.color(Color32::from_rgb(0xD0, 0x3B, 0x3B)),
+                                    })
+                                    .on_hover_text(line.text.clone());
+                                }
+                            },
+                        );
                     });
             } else {
                 egui::TopBottomPanel::bottom("log-folded").show(ctx, |ui| header(ui, self));
@@ -2157,9 +2309,9 @@ impl eframe::App for App {
                 }
                 // ☰ at the far right: Settings, the data folder and About.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // No frame or background, just the three lines.
-                    let burger = egui::Button::new(RichText::new(ICON_MENU).size(18.0)).frame(false);
-                    egui::menu::menu_custom_button(ui, burger, |ui| {
+                    // Three thin lines drawn by hand: the ☰ glyph is much too heavy.
+                    let burger = egui::Button::new("").frame(false).min_size(egui::vec2(26.0, 20.0));
+                    let menu = egui::menu::menu_custom_button(ui, burger, |ui| {
                         if ui.button("Settings…").clicked() {
                             self.show_settings = true;
                             ui.close_menu();
@@ -2177,6 +2329,12 @@ impl eframe::App for App {
                             ui.close_menu();
                         }
                     });
+                    let mid = menu.response.rect.center();
+                    let color = if menu.response.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
+                    let stroke = egui::Stroke::new(1.0_f32, color);
+                    for dy in [-4.0, 0.0, 4.0] {
+                        ui.painter().line_segment([egui::pos2(mid.x - 8.0, mid.y + dy), egui::pos2(mid.x + 8.0, mid.y + dy)], stroke);
+                    }
                 });
             });
             match &self.path {
@@ -2260,8 +2418,8 @@ impl eframe::App for App {
             let Some(loaded) = &self.loaded else {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
-                    ui.heading("Drag a PKG (PS4) file here");
-                    ui.weak("or open a folder containing a decrypted PS5 or PS3 game (Open folder…).");
+                    ui.heading("Drag a decrypted PS5/PS4 game or PKG file here");
+                    ui.weak("A PS3 game folder works too; you can also use Open file… or Open folder….");
                     if !self.library.entries.is_empty() {
                         ui.add_space(12.0);
                         ui.weak(format!("Your saved games are under {ICON_LIBRARY} Library."));
@@ -2359,7 +2517,7 @@ impl eframe::App for App {
                     if running {
                         do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
                     }
-                    match find_rpcs3(&self.settings) {
+                    match &rpcs3_exe {
                         Some(exe) => {
                             do_pick_rpcs3 = ui
                                 .add_enabled(!self.busy, egui::Link::new(RichText::new(format!("RPCS3: {}", exe.display())).monospace()))
@@ -2384,14 +2542,14 @@ impl eframe::App for App {
                         .on_disabled_hover_text("Needs a decrypted game folder (Open folder…).")
                         .clicked();
                     // Launch belongs to the open game: its own run folder, if it has one.
-                    let can_launch = !self.busy && !running && self.open_game_run_dir().is_some();
+                    let can_launch = !self.busy && !running && run_dir.is_some();
                     do_launch = ui.add_enabled(can_launch, egui::Button::new(RichText::new("Launch").size(15.0))).clicked();
                     if running {
                         do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
                     }
-                    match (self.settings.release(), &self.settings.anyps5_dir) {
+                    match (anyps5_release.as_ref(), &self.settings.anyps5_dir) {
                         // Once set, the button is replaced by the path; click it to change.
-                        (Ok(r), Some(dir)) => {
+                        (Some(r), Some(dir)) => {
                             do_pick_anyps5 = ui
                                 .add_enabled(
                                     !self.busy,
@@ -2404,7 +2562,7 @@ impl eframe::App for App {
                                 ))
                                 .clicked();
                         }
-                        (Err(_), Some(_)) => {
+                        (None, Some(_)) => {
                             do_pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("AnyPS5 folder…")).clicked();
                             ui.weak("AnyPS5 folder incomplete, pick it again");
                         }
@@ -2519,4 +2677,3 @@ const ICON_REFRESH: &str = "⟳";
 const ICON_STAR: &str = "☆";
 const ICON_STARRED: &str = "★";
 const ICON_LIBRARY: &str = "📚";
-const ICON_MENU: &str = "☰";

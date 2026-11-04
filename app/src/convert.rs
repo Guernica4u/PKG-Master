@@ -5,6 +5,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::binary::{fmt_size, Source};
@@ -23,6 +24,19 @@ const CHUNK: usize = 1 << 20;
 /// Progress callback: (bytes done, bytes total, current item).
 pub type Progress<'a> = &'a dyn Fn(u64, u64, &str);
 
+/// Error message for a long job stopped with the window's Cancel button.
+pub const JOB_CANCELLED: &str = "Cancelled.";
+
+/// Stands in for a Cancel button the CLI doesn't have.
+static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+fn cancelled(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Error::Conversion(JOB_CANCELLED.into()));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub enum Input {
     /// An opened package filesystem.
@@ -40,7 +54,7 @@ impl Input {
         match self {
             Input::Binary(_) => Ok(None),
             Input::Package(pfs) => match pfs.find(path)? {
-                Some(file) => Ok(Some(read_source(&file, path, progress)?)),
+                Some(file) => Ok(Some(read_source(&file, path, progress, &NEVER_CANCELLED)?)),
                 None => Ok(None),
             },
             Input::Folder(root) => {
@@ -371,11 +385,12 @@ pub struct ConvertReport {
     pub conversion: Conversion,
 }
 
-fn read_source(src: &dyn Source, label: &str, progress: Progress) -> Result<Vec<u8>> {
+fn read_source(src: &dyn Source, label: &str, progress: Progress, cancel: &AtomicBool) -> Result<Vec<u8>> {
     let total = src.len();
     let mut out = Vec::with_capacity(total as usize);
     let mut buf = vec![0u8; CHUNK];
     while (out.len() as u64) < total {
+        cancelled(cancel)?;
         let take = (total - out.len() as u64).min(CHUNK as u64) as usize;
         src.read_into(out.len() as u64, &mut buf[..take])?;
         out.extend_from_slice(&buf[..take]);
@@ -387,8 +402,21 @@ fn read_source(src: &dyn Source, label: &str, progress: Progress) -> Result<Vec<
 /// Convert the chosen file (or the default executable) to a standard ELF and
 /// write it to `output`. Nothing is written unless conversion succeeds.
 pub fn convert_to_elf(input: &Input, inner_path: Option<&str>, output: &Path, progress: Progress) -> Result<ConvertReport> {
+    convert_to_elf_cancellable(input, inner_path, output, progress, &NEVER_CANCELLED)
+}
+
+/// Like [`convert_to_elf`], but gives up when `cancel` is set.
+pub fn convert_to_elf_cancellable(
+    input: &Input,
+    inner_path: Option<&str>,
+    output: &Path,
+    progress: Progress,
+    cancel: &AtomicBool,
+) -> Result<ConvertReport> {
+    cancelled(cancel)?;
     let (source, data) = match input {
         Input::Binary(path) => {
+            cancelled(cancel)?;
             let data = fs::read(path)?;
             progress(data.len() as u64, data.len() as u64, "reading");
             (path.display().to_string(), data)
@@ -413,7 +441,7 @@ pub fn convert_to_elf(input: &Input, inner_path: Option<&str>, output: &Path, pr
                 }
                 return Err(Error::Conversion(format!("{path} was not found in the package filesystem")));
             };
-            let data = read_source(&file, &path, progress)?;
+            let data = read_source(&file, &path, progress, cancel)?;
             (path, data)
         }
         Input::Folder(root) => {
@@ -426,9 +454,11 @@ pub fn convert_to_elf(input: &Input, inner_path: Option<&str>, output: &Path, pr
             let data = input
                 .read_file(&path, progress)?
                 .ok_or_else(|| Error::Conversion(format!("{path} was not found in the folder")))?;
+            cancelled(cancel)?;
             (path, data)
         }
     };
+    cancelled(cancel)?;
     if !(is_elf(&data) || is_self(&data)) {
         return Err(Error::Conversion(format!("{source} is not an ELF or SELF file")));
     }
@@ -464,12 +494,19 @@ pub fn safe_relative(path: &str) -> Result<PathBuf> {
 
 /// Extract every file in the package into `out_dir`. Returns the file count.
 pub fn extract_all(pfs: &Arc<PfsImage>, out_dir: &Path, progress: Progress) -> Result<usize> {
+    extract_all_cancellable(pfs, out_dir, progress, &NEVER_CANCELLED)
+}
+
+/// Like [`extract_all`], but gives up when `cancel` is set. A partly written
+/// file is removed, and History rolls the whole target back.
+pub fn extract_all_cancellable(pfs: &Arc<PfsImage>, out_dir: &Path, progress: Progress, cancel: &AtomicBool) -> Result<usize> {
     let entries = pfs.walk()?;
     let total: u64 = entries.iter().filter(|(_, i)| i.is_file()).map(|(_, i)| i.len()).sum();
     let mut done = 0u64;
     let mut written = 0usize;
     let mut buf = vec![0u8; CHUNK];
     for (path, inode) in &entries {
+        cancelled(cancel)?;
         let dest = out_dir.join(safe_relative(path)?);
         if inode.is_dir() {
             fs::create_dir_all(&dest)?;
@@ -486,6 +523,7 @@ pub fn extract_all(pfs: &Arc<PfsImage>, out_dir: &Path, progress: Progress) -> R
             let mut out = std::io::BufWriter::new(fs::File::create(&dest)?);
             let mut pos = 0u64;
             while pos < file.size() {
+                cancelled(cancel)?;
                 let take = (file.size() - pos).min(CHUNK as u64) as usize;
                 file.read_into(pos, &mut buf[..take])?;
                 out.write_all(&buf[..take])?;
