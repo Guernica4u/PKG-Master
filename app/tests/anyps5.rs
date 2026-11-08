@@ -77,7 +77,8 @@ fn export_folder_layout() {
         assert_eq!(fs::read(out.join("app0").join(rel)).unwrap(), fs::read(game.join(rel)).unwrap(), "{rel}");
     }
     let how = fs::read_to_string(out.join(HOW_TO_RUN)).unwrap();
-    assert!(how.contains("relinker --windows source/eboot.elf app.exe"));
+    let cmd = if cfg!(windows) { "relinker --windows source/eboot.elf app.exe" } else { "relinker source/eboot.elf app.elf" };
+    assert!(how.contains(cmd), "{how}");
     assert!(how.contains("libs/*.prx"));
     assert!(how.contains("libC.prx"));
 
