@@ -741,8 +741,9 @@ fn how_to_run(r: &ExportReport) -> String {
     s.push_str(&format!("  source/sce_module/    {} module(s) converted to ELF\n", r.modules.len()));
     s.push_str(&format!("  app0/                 the {} original file(s)\n\n", r.app0_files));
     s.push_str("Next steps, run from this folder\n");
-    s.push_str("  1. relinker --windows source/eboot.elf app.exe\n");
-    s.push_str("  2. Copy AnyPS5's libs/*.prx next to app.exe.\n");
+    let (flag, app) = if cfg!(windows) { ("--windows ", "app.exe") } else { ("", "app.elf") };
+    s.push_str(&format!("  1. relinker {flag}source/eboot.elf {app}\n"));
+    s.push_str(&format!("  2. Copy AnyPS5's libs/*.prx into libs/ next to {app}.\n"));
     if !r.skipped.is_empty() {
         s.push_str("\nModules that were not converted (AnyPS5 will be missing them)\n");
         for (name, why) in &r.skipped {

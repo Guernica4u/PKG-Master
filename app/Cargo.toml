@@ -24,7 +24,7 @@ sha2 = "0.10"
 sha3 = "0.10"
 hmac = "0.12"
 flate2 = "1"
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 rfd = "0.15"
 trash = "5"
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -38,6 +38,7 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+panic = "abort"
 
 [build-dependencies]
 winresource = "0.1"

@@ -10,9 +10,15 @@ use std::sync::Mutex;
 use common::{build_elf, build_self, scratch, write};
 use pkgmaster::anyps5::{
     find_libs, find_release, find_relinker, launch_command, preflight, prepare_source, relinker_args, run_logged, run_relinker, sfo_string,
-    Settings,
+    Settings, APP_EXE,
 };
 use pkgmaster::elf::to_elf;
+
+/// The relinker's arguments on this platform: `--windows` first on Windows.
+fn platform_args(rest: &[&str]) -> Vec<String> {
+    let windows = cfg!(windows).then_some("--windows");
+    windows.into_iter().chain(rest.iter().copied()).map(str::to_string).collect()
+}
 
 /// A PARAM.SFO holding UTF-8 string values.
 fn build_sfo(pairs: &[(&str, &str)]) -> Vec<u8> {
@@ -126,10 +132,7 @@ fn detects_ps4_titles() {
     assert_eq!(pre.ps4, None);
     assert!(pre.warnings().is_empty(), "{:?}", pre.warnings());
     assert_eq!(pre.module_dirs, ["media/plugins"]);
-    assert_eq!(
-        relinker_args(&pre),
-        ["--windows", "--module-dir", "media/plugins", "source/eboot.elf", "app.exe"]
-    );
+    assert_eq!(relinker_args(&pre), platform_args(&["--module-dir", "media/plugins", "source/eboot.elf", APP_EXE]));
 
     assert!(preflight(&tmp.join("missing")).is_err());
     let _ = fs::remove_dir_all(&tmp);
@@ -280,25 +283,17 @@ fn run_with_mock_relinker() {
 
     let out = tmp.join("run");
     let r = run_relinker(&game, &release, &out, &|_, _, _| {}, &log).unwrap();
-    let expected = [
-        "--windows",
-        "--module-dir",
-        "Media/Modules",
-        "--module-dir",
-        "Media/Plugins",
-        "source/eboot.elf",
-        "app.exe",
-    ];
+    let expected = platform_args(&["--module-dir", "Media/Modules", "--module-dir", "Media/Plugins", "source/eboot.elf", APP_EXE]);
     assert_eq!(r.args, expected);
     assert_eq!(fs::read_to_string(out.join("relinker-args.txt")).unwrap(), expected.join("\n"));
     let log_text = lines.lock().unwrap().join("\n");
-    assert!(log_text.contains("mock relinker: --windows"), "{log_text}");
+    assert!(log_text.contains(&format!("mock relinker: {}", expected.join(" "))), "{log_text}");
     assert!(log_text.contains("mock relinker stderr line"), "{log_text}");
     assert!(lines.lock().unwrap().iter().any(|l| l == "Instruction scan | eboot.elf | 100%"), "{log_text}");
     assert!(!log_text.contains("57%"), "{log_text}");
 
     // Runtime layout from AnyPS5's USAGE.md.
-    assert!(out.join("app.exe").is_file());
+    assert!(out.join(APP_EXE).is_file());
     assert_eq!(r.libs, 3);
     assert_eq!(fs::read(out.join("libs/libgcc_s_seh-1.dll")).unwrap(), b"mingw runtime");
     assert_eq!(fs::read(out.join("libs/libkernel.prx")).unwrap(), b"anyps5 kernel");
@@ -346,7 +341,7 @@ fn relinker_failure_is_reported() {
     .expect("the relinker failed");
     assert!(err.to_string().contains("relinker failed"), "{err}");
     assert!(lines.lock().unwrap().iter().any(|l| l.contains("failing on purpose")));
-    assert!(!tmp.join("run/app.exe").exists());
+    assert!(!tmp.join("run").join(APP_EXE).exists());
     assert!(launch_command(&tmp.join("run")).is_err());
     let _ = fs::remove_dir_all(&tmp);
 }
