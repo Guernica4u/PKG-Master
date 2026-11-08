@@ -39,8 +39,18 @@ pub const SOURCE_DIR: &str = "source";
 pub const APP0_DIR: &str = "app0";
 pub const LIBS_DIR: &str = "libs";
 
-/// The relinker is always run with `--windows`.
+/// What the relinker writes: a Windows program (`--windows`) on Windows, the
+/// default Linux ELF elsewhere.
+#[cfg(windows)]
 pub const APP_EXE: &str = "app.exe";
+#[cfg(not(windows))]
+pub const APP_EXE: &str = "app.elf";
+/// The start of the libraries archive name in an AnyPS5 release. The `-v`
+/// keeps the `…-unpatched-v…` archives out.
+#[cfg(windows)]
+const PRX_ARCHIVE: &str = "prx-windows-v";
+#[cfg(not(windows))]
+const PRX_ARCHIVE: &str = "prx-linux-v";
 /// Release assets are versioned, e.g. `relinker-v0.1.2.exe`.
 const RELINKER_PREFIX: &str = "relinker";
 #[cfg(windows)]
@@ -54,19 +64,55 @@ const LIB_EXTS: [&str; 2] = ["prx", "dll"];
 // --------------------------------------------------------------------------
 // Settings
 
-/// Where the AnyPS5 choices are remembered: `%APPDATA%\PKG Master\settings.ini`,
-/// or beside the executable when there is no APPDATA.
+/// Where the settings are remembered: `%APPDATA%\PKG Master\settings.ini` on
+/// Windows, `~/.config/pkg-master/settings.ini` on Linux, or beside the
+/// executable when neither exists. History and the Library sit next to it.
 pub fn settings_path() -> PathBuf {
     if let Some(p) = std::env::var_os("PKGMASTER_SETTINGS") {
         return PathBuf::from(p);
     }
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        return Path::new(&appdata).join("PKG Master").join("settings.ini");
+    if let Some(dir) = user_dir(false) {
+        return dir.join("settings.ini");
     }
     std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|d| d.join("pkgmaster-settings.ini")))
         .unwrap_or_else(|| PathBuf::from("pkgmaster-settings.ini"))
+}
+
+/// The folder for big downloads when the app's own folder can't be written
+/// to: `%LOCALAPPDATA%\PKG Master`, or `~/.local/share/pkg-master`.
+pub fn local_data_dir() -> Option<PathBuf> {
+    user_dir(true)
+}
+
+#[cfg(windows)]
+fn user_dir(local: bool) -> Option<PathBuf> {
+    std::env::var_os(if local { "LOCALAPPDATA" } else { "APPDATA" }).map(|d| PathBuf::from(d).join("PKG Master"))
+}
+
+/// The XDG folders: `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME`, or their defaults under `$HOME`.
+#[cfg(not(windows))]
+fn user_dir(local: bool) -> Option<PathBuf> {
+    let (var, default) = if local { ("XDG_DATA_HOME", ".local/share") } else { ("XDG_CONFIG_HOME", ".config") };
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(default)))
+        .map(|d| d.join("pkg-master"))
+}
+
+/// Make a downloaded program runnable (zip and HTTP downloads lose the mode).
+pub fn make_executable(p: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = fs::metadata(p)?.permissions();
+        perm.set_mode(perm.mode() | 0o755);
+        fs::set_permissions(p, perm)?;
+    }
+    let _ = p;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -271,7 +317,19 @@ pub fn install_release(
             ))
         })
     };
-    let (zip_asset, relinker_asset) = (pick("prx-windows", ".zip")?, pick("relinker", ".exe")?);
+    let zip_asset = pick(PRX_ARCHIVE, ".zip")?;
+    // relinker-v0.1.4.exe on Windows; relinker-v0.1.4 (no extension) elsewhere.
+    let relinker_asset = release
+        .assets
+        .iter()
+        .find(|a| {
+            let n = a.name.to_lowercase();
+            n.starts_with("relinker-v") && (n.ends_with(".exe") == cfg!(windows)) && !n.ends_with(".zip") && !n.ends_with(".gz")
+        })
+        .cloned()
+        .ok_or_else(|| {
+            Error::Conversion(format!("AnyPS5's latest release ({}) has no relinker; download it by hand from {ANYPS5_RELEASES}", release.tag))
+        })?;
 
     // A folder this download created is removed again if it fails or is cancelled.
     let fresh = !dest.exists();
@@ -297,7 +355,9 @@ pub fn install_release(
                 _ => return Err(Error::Conversion(format!("the AnyPS5 download has no libs/ folder (in {})", dest.display()))),
             }
         };
-        download(&relinker_asset, &home.join(&relinker_asset.name), progress, cancel)?;
+        let relinker = home.join(&relinker_asset.name);
+        download(&relinker_asset, &relinker, progress, cancel)?;
+        make_executable(&relinker)?;
         Ok((home, release.tag.clone()))
     })();
     if result.is_err() && fresh {
@@ -442,7 +502,10 @@ pub fn preflight(root: &Path) -> Result<Preflight> {
 
 /// Arguments for the relinker, run from the output folder.
 pub fn relinker_args(pre: &Preflight) -> Vec<String> {
-    let mut args = vec!["--windows".to_string()];
+    let mut args = Vec::new();
+    if cfg!(windows) {
+        args.push("--windows".to_string());
+    }
     for d in &pre.module_dirs {
         args.push("--module-dir".into());
         args.push(d.clone());

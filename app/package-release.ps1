@@ -53,6 +53,7 @@ If Windows says "Windows protected your PC", click More info, then Run anyway
 - Library: star games to save them; play them from the Library button.
 - Run in RPCS3: plays a PS3 game you dumped, with your own RPCS3 (https://rpcs3.net).
 - Updates: when a new version is out, the app offers to update itself.
+- Menu > Uninstall PKG Master removes everything the app saved.
 - Shows the game's title, title ID, version and icon when you open it.
 
 No Sony keys are included; retail packages can't be decrypted.
