@@ -190,6 +190,12 @@ pub fn unzip(zip: &Path, dest: &Path, progress: Progress, cancel: &AtomicBool) -
         }
         let mut file = fs::File::create(&out)?;
         std::io::copy(&mut entry, &mut file)?;
+        // Keep execute bits (Linux archives hold runnable programs).
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&out, fs::Permissions::from_mode(mode & 0o777))?;
+        }
     }
     Ok(())
 }

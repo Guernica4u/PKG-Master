@@ -27,7 +27,7 @@ use pkgmaster::convert::{
 use pkgmaster::download::{Release, CANCELLED};
 use pkgmaster::history::{ago, History};
 use pkgmaster::library::{Entry, Library};
-use pkgmaster::update;
+use pkgmaster::{uninstall, update};
 use pkgmaster::Error;
 
 const PACKAGE_EXTS: [&str; 1] = ["pkg"];
@@ -155,6 +155,8 @@ struct App {
     /// The ☰ menu's Settings and About windows.
     show_settings: bool,
     show_about: bool,
+    /// ☰ > Uninstall: what would be deleted, and whether each is ticked.
+    uninstall: Option<Vec<(uninstall::Item, bool)>>,
     /// Explain how to install the PS3 system software in RPCS3.
     show_ps3_firmware: bool,
     /// The launched game, while it runs.
@@ -220,6 +222,9 @@ struct PathCache {
     run_dir: Option<Option<PathBuf>>,
     /// Whether a run folder has an app.exe, checked once per folder.
     run_ready: HashMap<PathBuf, bool>,
+    /// Whether a Library game is still there, checked once per path.
+    exists: HashMap<PathBuf, bool>,
+    shadpkg: Option<Option<PathBuf>>,
 }
 
 /// Something picked from a file's right-click menu.
@@ -259,6 +264,7 @@ impl App {
             log: Vec::new(),
             show_settings: false,
             show_about: false,
+            uninstall: None,
             show_ps3_firmware: false,
             game: Arc::new(Mutex::new(None)),
             browse: None,
@@ -469,10 +475,7 @@ impl App {
         let relinker = if find_relinker(&dir).is_some() {
             None
         } else {
-            let mut dialog = rfd::FileDialog::new()
-                .set_title("Pick the AnyPS5 relinker (relinker-v….exe from AnyPS5's releases)")
-                .add_filter("Program", &["exe"])
-                .add_filter("All files", &["*"]);
+            let mut dialog = program_dialog("Pick the AnyPS5 relinker (relinker-v… from AnyPS5's releases)");
             let start = self.settings.relinker.as_ref().and_then(|r| r.parent()).or(dir.parent());
             if let Some(d) = start {
                 dialog = dialog.set_directory(d);
@@ -576,6 +579,16 @@ impl App {
     /// Forget the cached paths (a setting or the open game changed).
     fn clear_path_cache(&mut self) {
         self.paths = PathCache::default();
+    }
+
+    /// Whether `p` exists; each path is checked once until the cache is cleared.
+    fn path_exists(&mut self, p: &Path) -> bool {
+        *self.paths.exists.entry(p.to_path_buf()).or_insert_with(|| p.exists())
+    }
+
+    /// The shadPKG that Run shadPKG would use, looked up once.
+    fn shadpkg_path(&mut self) -> Option<PathBuf> {
+        self.paths.shadpkg.get_or_insert_with(find_shadpkg).clone()
     }
 
     /// Whether `dir` holds an app.exe; each run folder is checked once.
@@ -990,14 +1003,14 @@ impl App {
                     }
                     if ui.button("Open shadpkg folder").clicked() {
                         let _ = std::fs::create_dir_all(&dir);
-                        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                        open_in_system(&dir);
                     }
                     browse = ui.button("I have it elsewhere…").on_hover_text("Pick your shadPKG.exe; it gets copied into the shadpkg folder").clicked();
                     close = ui.button("Close").clicked();
                 });
             });
         if browse {
-            if let Some(file) = rfd::FileDialog::new().set_title("Pick shadPKG.exe").add_filter("Program", &["exe"]).pick_file() {
+            if let Some(file) = program_dialog("Pick shadPKG").pick_file() {
                 let dest = dir.join(SHADPKG_NAMES[0]);
                 let copied = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&file, &dest));
                 self.status = match copied {
@@ -1060,7 +1073,7 @@ impl App {
                             ui.painter().rect_filled(icon_rect, 6.0, ui.visuals().faint_bg_color);
                         }
                     }
-                    let missing = !e.path.exists();
+                    let missing = !self.path_exists(&e.path);
                     let color = if missing { ui.visuals().weak_text_color() } else { ui.visuals().text_color() };
                     let galley = ui.painter().layout(e.title.clone(), egui::FontId::proportional(13.0), color, TILE.x - 12.0);
                     let text_pos = egui::pos2(rect.center().x - galley.size().x / 2.0, icon_rect.bottom() + 6.0);
@@ -1246,7 +1259,7 @@ impl App {
 
     /// Ask for rpcs3.exe and remember it.
     fn pick_rpcs3(&mut self) -> bool {
-        let Some(file) = rfd::FileDialog::new().set_title("Pick rpcs3.exe").add_filter("Program", &["exe"]).pick_file() else {
+        let Some(file) = program_dialog("Pick RPCS3").pick_file() else {
             return false;
         };
         self.settings.rpcs3 = Some(file.clone());
@@ -1265,7 +1278,7 @@ impl App {
         if !self.show_ps3_firmware {
             return;
         }
-        let rpcs3 = find_rpcs3(&self.settings);
+        let rpcs3 = self.paths.rpcs3_exe.clone().flatten();
         let mut close = false;
         egui::Window::new("RPCS3 needs the PS3 system software")
             .collapsible(false)
@@ -1312,6 +1325,7 @@ impl App {
         let mut open = true;
         let mut changed = false;
         let (mut pick_anyps5, mut pick_rpcs3, mut get_rpcs3) = (false, false, false);
+        let (rpcs3, shadpkg) = (self.paths.rpcs3_exe.clone().flatten(), self.shadpkg_path());
         egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
@@ -1343,9 +1357,8 @@ impl App {
                     ui.end_row();
 
                     ui.label("RPCS3");
-                    let rpcs3 = find_rpcs3(&self.settings);
                     let missing = rpcs3.is_none();
-                    path_label(ui, rpcs3);
+                    path_label(ui, rpcs3.clone());
                     ui.horizontal(|ui| {
                         pick_rpcs3 = ui.add_enabled(!self.busy, egui::Button::new("Change…")).clicked();
                         if missing {
@@ -1355,11 +1368,11 @@ impl App {
                     ui.end_row();
 
                     ui.label("shadPKG");
-                    path_label(ui, find_shadpkg());
+                    path_label(ui, shadpkg.clone());
                     if ui.button("Open its folder").clicked() {
                         let dir = shadpkg_dir();
                         let _ = std::fs::create_dir_all(&dir);
-                        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                        open_in_system(&dir);
                     }
                     ui.end_row();
                 });
@@ -1407,6 +1420,56 @@ impl App {
         let reachable = y >= 0.0 && y < monitor.y - 40.0 && x < monitor.x - 80.0;
         if !reachable {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(40.0, 40.0)));
+        }
+    }
+
+    /// ☰ > Uninstall: what will be deleted, with the big downloads unticked.
+    fn uninstall_ui(&mut self, ctx: &egui::Context) {
+        let busy = self.busy || self.game_running();
+        let Some(items) = self.uninstall.as_mut() else { return };
+        let (mut go, mut cancel) = (false, false);
+        egui::Window::new("Uninstall PKG Master")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(520.0);
+                ui.label("This deletes PKG Master and everything ticked below:");
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    for (item, on) in items.iter_mut() {
+                        let text = format!("{}  ({})", item.what, fmt_size(item.size));
+                        // Required items show as ticked boxes that can't be changed.
+                        let mut always = true;
+                        let check = if item.optional { egui::Checkbox::new(on, text) } else { egui::Checkbox::new(&mut always, text) };
+                        ui.add_enabled(item.optional, check).on_hover_text(item.path.display().to_string());
+                    }
+                });
+                ui.add_space(4.0);
+                ui.weak("Unticked downloads, like AnyPS5 with your games' run folders, are kept.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let red = RichText::new("Uninstall").color(Color32::from_rgb(0xD0, 0x3B, 0x3B)).strong();
+                    go = ui
+                        .add_enabled(!busy, egui::Button::new(red))
+                        .on_disabled_hover_text("Wait for the running job or game to finish first.")
+                        .clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+        let chosen: Vec<PathBuf> = items.iter().filter(|(_, on)| *on).map(|(i, _)| i.path.clone()).collect();
+        if cancel {
+            self.uninstall = None;
+        }
+        if go {
+            let left = uninstall::remove(&chosen);
+            let dirs = uninstall::folders();
+            uninstall::prune(&dirs);
+            self.uninstall = None;
+            match uninstall::finish_after_exit(&left, &dirs) {
+                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => self.status = Status::Err(format!("PKG Master could not finish removing itself: {e}")),
+            }
         }
     }
 
@@ -1824,13 +1887,30 @@ fn file_menu(ui: &mut egui::Ui, full: &Path, action: &mut Option<RowAction>) {
     }
 }
 
-/// Show a file or folder in File Explorer (its folder, if it is gone).
+/// Show a file or folder in the file manager: selected in Explorer on
+/// Windows, its folder elsewhere (and when it is gone).
 fn reveal(p: &Path) {
-    let _ = if p.exists() {
-        std::process::Command::new("explorer").arg(format!("/select,{}", p.display())).spawn()
+    if cfg!(windows) && p.exists() {
+        let _ = std::process::Command::new("explorer").arg(format!("/select,{}", p.display())).spawn();
     } else {
-        std::process::Command::new("explorer").arg(p.parent().unwrap_or(p)).spawn()
-    };
+        open_in_system(p.parent().unwrap_or(p));
+    }
+}
+
+/// Open a folder, file or web address with the system's default handler.
+fn open_in_system(target: impl AsRef<std::ffi::OsStr>) {
+    let tool = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    let _ = std::process::Command::new(tool).arg(target).spawn();
+}
+
+/// A file picker for a program: `.exe` files on Windows, any file elsewhere.
+fn program_dialog(title: &str) -> rfd::FileDialog {
+    let dialog = rfd::FileDialog::new().set_title(title);
+    if cfg!(windows) {
+        dialog.add_filter("Program", &["exe"])
+    } else {
+        dialog
+    }
 }
 
 /// The `.pkg` files directly inside `dir`, when `dir` is a folder without an
@@ -1859,11 +1939,14 @@ fn file_label(p: &Path) -> String {
 const SHADPKG_RELEASES: &str = "https://github.com/seregonwar/ShadPKG/releases";
 /// The folder next to pkgmaster-gui.exe where shadPKG.exe goes.
 const SHADPKG_DIR: &str = "shadpkg";
+#[cfg(windows)]
 const SHADPKG_NAMES: [&str; 2] = ["shadPKG.exe", "shadpkg.exe"];
+#[cfg(not(windows))]
+const SHADPKG_NAMES: [&str; 3] = ["shadPKG", "shadpkg", "shadpkg-debian"];
 
 /// `shadpkg\` next to this app: the place to drop shadPKG.exe.
 fn shadpkg_dir() -> PathBuf {
-    std::env::current_exe()
+    pkgmaster::update::program_path()
         .ok()
         .and_then(|e| e.parent().map(|d| d.join(SHADPKG_DIR)))
         .unwrap_or_else(|| PathBuf::from(SHADPKG_DIR))
@@ -1878,7 +1961,7 @@ fn find_shadpkg() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let exe = std::env::current_exe().ok()?;
+    let exe = pkgmaster::update::program_path().ok()?;
     for dir in exe.ancestors().skip(1) {
         for sub in [Path::new(SHADPKG_DIR), Path::new("shad"), Path::new("")] {
             for name in SHADPKG_NAMES {
@@ -1904,7 +1987,7 @@ const ABOUT_DESCRIPTION: &str = "A tool for PS4/PS5 games that lets you seamless
 /// The user's rpcs3.exe: the one they picked, `PKGMASTER_RPCS3`, or an
 /// `rpcs3\rpcs3.exe` next to this app.
 fn find_rpcs3(settings: &Settings) -> Option<PathBuf> {
-    let beside_app = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("rpcs3").join("rpcs3.exe")));
+    let beside_app = pkgmaster::update::program_path().ok().and_then(|e| e.parent().map(|d| d.join("rpcs3").join(pkgmaster::rpcs3::RPCS3_EXE)));
     [settings.rpcs3.clone(), std::env::var_os("PKGMASTER_RPCS3").map(PathBuf::from), beside_app]
         .into_iter()
         .flatten()
@@ -1933,16 +2016,15 @@ fn rpcs3_download_dir() -> PathBuf {
     DIR.get_or_init(|| beside_app_or_local("rpcs3")).clone()
 }
 
-/// A `name` folder next to this app, or in `%LOCALAPPDATA%\PKG Master` when
-/// the app's folder can't be written to (such as Program Files).
+/// A `name` folder next to this app, or in `%LOCALAPPDATA%\PKG Master`
+/// (`~/.local/share/pkg-master` on Linux) when the app's folder can't be
+/// written to (such as Program Files).
 fn beside_app_or_local(name: &str) -> PathBuf {
-    let beside_app = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(name)));
+    let beside_app = pkgmaster::update::program_path().ok().and_then(|e| e.parent().map(|d| d.join(name)));
     if let Some(dir) = beside_app.filter(|d| d.parent().is_some_and(can_write)) {
         return dir;
     }
-    std::env::var_os("LOCALAPPDATA")
-        .map(|d| Path::new(&d).join("PKG Master").join(name))
-        .unwrap_or_else(|| PathBuf::from(name))
+    pkgmaster::anyps5::local_data_dir().map(|d| d.join(name)).unwrap_or_else(|| PathBuf::from(name))
 }
 
 /// Whether a file can be created in `dir`.
@@ -1980,7 +2062,7 @@ fn looks_ps4(l: &Loaded) -> bool {
 
 /// Open a web page in the default browser.
 fn open_url(url: &str) {
-    let _ = std::process::Command::new("explorer").arg(url).spawn();
+    open_in_system(url);
 }
 
 fn shadpkg_extract(
@@ -2319,13 +2401,19 @@ impl eframe::App for App {
                         if ui.button("Open data folder").on_hover_text("Settings, History and the Library live here").clicked() {
                             if let Some(dir) = settings_path().parent() {
                                 let _ = std::fs::create_dir_all(dir);
-                                let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                                open_in_system(dir);
                             }
                             ui.close_menu();
                         }
                         ui.separator();
                         if ui.button("About PKG Master").clicked() {
                             self.show_about = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Uninstall PKG Master…").clicked() {
+                            let plan = uninstall::plan(&self.settings);
+                            self.uninstall = Some(plan.into_iter().map(|i| { let on = !i.optional; (i, on) }).collect());
                             ui.close_menu();
                         }
                     });
@@ -2352,6 +2440,7 @@ impl eframe::App for App {
         self.ps3_firmware_ui(ctx);
         self.settings_ui(ctx);
         self.about_ui(ctx);
+        self.uninstall_ui(ctx);
         self.update_ui(ctx);
 
         self.actions_bottom = None;

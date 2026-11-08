@@ -1,0 +1,42 @@
+# When a release is published, builds the Linux tar.gz and AppImage and
+# attaches them to it (the Windows zip is uploaded with the release itself).
+name: Linux release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the Linux files to (e.g. v0.1.8)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libfuse2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: appimagetool
+        run: |
+          curl -sSL -o /usr/local/bin/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/appimagetool
+      - name: Build and package
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: sh app/package-linux.sh
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          cd app/dist
+          for f in *-linux-x64.tar.gz *-x86_64.AppImage; do sha256sum "$f"; done
+          gh release upload "$TAG" *-linux-x64.tar.gz *-x86_64.AppImage --clobber

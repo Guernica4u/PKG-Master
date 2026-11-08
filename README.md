@@ -5,11 +5,14 @@ It supports decrypting ps4 games through ShadPKG and setups AnyPS5 for you, turn
 the game's executable (eboot.bin) into a standard .ELF file, unpacks packages, and can run a
 decrypted PS5 game through [AnyPS5](https://github.com/boykopovar/AnyPS5).
 
-**[⬇ Download the latest release](https://github.com/Guernica4u/PKG-Master/releases/latest)**:
-unzip it and run `pkgmaster-gui.exe`. Nothing to install.
+**[⬇ Download the latest release](https://github.com/Guernica4u/PKG-Master/releases/latest)**.
+Nothing to install:
 
-> Windows may say "Windows protected your PC" because the app isn't
-> code-signed. Click **More info → Run anyway**.
+- **Windows:** unzip `PKG-Master-v…-windows-x64.zip` and run `pkgmaster-gui.exe`.
+  Windows may say "Windows protected your PC" because the app isn't
+  code-signed; click **More info → Run anyway**.
+- **Linux:** run `PKG-Master-v…-x86_64.AppImage` (`chmod +x` it first), or
+  unpack `PKG-Master-v…-linux-x64.tar.gz` and run `./pkgmaster-gui`.
 
 ## What it does
 
@@ -37,6 +40,19 @@ Files inside a `.pkg` are read-only, so those only get Convert and Copy path.
 Saved games live in `%APPDATA%\PKG Master\library.json`, with a small copy of
 each icon in `library-icons\`. The log under the buttons folds away when you
 open a different game, and it can't be dragged over the Run / Launch buttons.
+
+### Uninstall
+
+**☰ → Uninstall PKG Master…** lists everything the app saved on your computer
+and removes it: settings, History and its backups, the Library, update
+leftovers, half-finished downloads and the program itself (on Windows, also
+shortcuts to it). The AnyPS5 and RPCS3 folders it downloaded hold your games'
+run folders and RPCS3's saves, so they are listed unticked and stay unless you
+tick them.
+
+App data lives in `%APPDATA%\PKG Master` on Windows and `~/.config/pkg-master`
+on Linux; big downloads go next to the app, or to `%LOCALAPPDATA%\PKG Master`
+/ `~/.local/share/pkg-master` when the app's folder can't be written to.
 
 ### Updates
 
@@ -130,7 +146,7 @@ checks.
 ```bash
 # Desktop app (needs Rust, MSVC toolchain on Windows)
 cd app
-cargo build --release          # target/release/pkgmaster-gui.exe and pkgmaster-cli.exe
+cargo build --release          # target/release/pkgmaster-gui(.exe) and pkgmaster-cli(.exe)
 cargo test
 
 # Python tool
