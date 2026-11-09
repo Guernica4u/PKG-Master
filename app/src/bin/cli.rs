@@ -1,6 +1,7 @@
-//! Minimal command-line front end, used to check the Rust core against the
-//! Python implementation and for scripting.
+//! Command-line PKG Master, for scripting. Drop an eboot.bin on the exe to
+//! convert it to eboot.elf next to it.
 //!
+//!   pkgmaster-cli FILE
 //!   pkgmaster-cli info    FILE [--passcode P]
 //!   pkgmaster-cli list    FILE [--passcode P]
 //!   pkgmaster-cli convert FILE OUT [--passcode P] [--path P]
@@ -13,7 +14,7 @@
 //! also runs the user's own AnyPS5 relinker (the folder given, or the one saved
 //! by the window) and lays out app.exe, libs/ and app0/ in DIR.
 //!
-//! Exit codes match the Python CLI: 0 ok, 2 bad file/usage, 3 key required or
+//! Exit codes: 0 ok, 2 bad file/usage, 3 key required or
 //! wrong, 4 recognised but unimplemented.
 
 use std::path::Path;
@@ -25,10 +26,39 @@ use pkgmaster::Error;
 
 fn usage() -> ExitCode {
     eprintln!("usage: pkgmaster-cli info|list|convert|extract|export|anyps5 FILE [OUT] [--passcode P] [--path P] [--anyps5 DIR] [--relinker FILE]");
+    eprintln!("   or: drop an eboot.bin on pkgmaster-cli to convert it to eboot.elf next to it");
     ExitCode::from(2)
 }
 
 fn main() -> ExitCode {
+    let code = run();
+    // Double-clicked or dropped on: keep the window open so the output can be read.
+    if own_console() {
+        eprintln!("
+Press Enter to close.");
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
+    code
+}
+
+/// True when this program is the only one on its console, i.e. Explorer
+/// opened a fresh window for it instead of it running in a terminal.
+#[cfg(windows)]
+fn own_console() -> bool {
+    extern "system" {
+        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+    }
+    let mut ids = [0u32; 2];
+    // SAFETY: the buffer holds count u32s.
+    unsafe { GetConsoleProcessList(ids.as_mut_ptr(), 2) == 1 }
+}
+
+#[cfg(not(windows))]
+fn own_console() -> bool {
+    false
+}
+
+fn run() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut take_opt = |name: &str| -> Option<String> {
         let i = args.iter().position(|a| a == name)?;
@@ -40,6 +70,15 @@ fn main() -> ExitCode {
     let inner = take_opt("--path");
     let anyps5_dir = take_opt("--anyps5");
     let relinker = take_opt("--relinker");
+    // A lone file (dropped on the exe): convert it to <name>.elf beside it.
+    if let [file] = args.as_slice() {
+        let p = Path::new(file);
+        // An .elf would be overwritten by its own output, so it gets the usage text.
+        if p.is_file() && !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("elf")) {
+            let out = p.with_extension("elf").to_string_lossy().into_owned();
+            args = vec!["convert".into(), file.clone(), out];
+        }
+    }
     if args.len() < 2 {
         return usage();
     }

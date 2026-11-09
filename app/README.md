@@ -7,7 +7,6 @@ small command-line companion (`pkgmaster-cli.exe`). See the
 ```bash
 cargo build --release   # target/release/pkgmaster-gui.exe, pkgmaster-cli.exe
 cargo test
-python ../app/tests/parity.py  # needs the Python package installed; Rust vs Python, byte for byte
 ```
 
 | File | Responsibility |
