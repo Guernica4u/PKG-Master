@@ -1,6 +1,6 @@
 //! PlayStation File System (PFS) reader, including PFSC compressed files.
 //!
-//! Three inode layouts exist (see HANDOFF.md section 5):
+//! Three inode layouts exist:
 //!
 //! | mode      | size  | layout                                    |
 //! |-----------|-------|-------------------------------------------|

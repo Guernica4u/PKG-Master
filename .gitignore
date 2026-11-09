@@ -13,3 +13,4 @@ app/target/
 .claude/
 shad/
 *.log
+.freebuff/
