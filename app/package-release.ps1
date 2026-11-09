@@ -38,25 +38,28 @@ PKG Master v$version
 
 Run pkgmaster-gui.exe. Nothing to install.
 
-If Windows says "Windows protected your PC", click More info, then Run anyway
-(the app isn't code-signed).
+Windows warns because the app isn't code-signed. Blue box: More info, then
+Run anyway. Defender blocked it: Windows Security > Protection history >
+Allow.
 
-- Open file... / Open folder...: a fake-signed or debug .pkg, or a decrypted
-  game folder you dumped yourself.
-- Convert to ELF...: eboot.bin -> standard ELF (the file type AnyPS5 needs).
-- Run in AnyPS5...: needs AnyPS5 (https://github.com/boykopovar/AnyPS5/releases).
-  The first time, the app offers to download the official release for you.
-- Run shadPKG (PS4)...: download shadPKG.exe from its official releases
-  (https://github.com/seregonwar/ShadPKG/releases) and drop it in the
-  shadpkg folder next to this file.
-- History: undo anything the app wrote.
-- Library: star games to save them; play them from the Library button.
-- Run in RPCS3: plays a PS3 game you dumped, with your own RPCS3 (https://rpcs3.net).
-- Updates: when a new version is out, the app offers to update itself.
-- Menu > Uninstall PKG Master removes everything the app saved.
-- Shows the game's title, title ID, version and icon when you open it.
+Drop a file on the window:
+  eboot.bin            -> Convert to ELF
+  PS5 game folder      -> Run in AnyPS5, then Launch
+  PS4 .pkg             -> Run shadPKG (PS4) to decrypt and extract it
+  fake / debug .pkg    -> passcode (often 32 zeros), then convert or extract
+  PS3 folder or .iso   -> Run in RPCS3
 
-No Sony keys are included; retail packages can't be decrypted.
+Emulators aren't included. The app downloads the official release when
+you ask. shadPKG: get shadPKG.exe from
+https://github.com/seregonwar/ShadPKG/releases and put it in the shadpkg
+folder.
+
+Command line: drop an eboot.bin on pkgmaster-cli.exe, or run
+  pkgmaster-cli convert eboot.bin eboot.elf
+
+Uninstall with Menu > Uninstall PKG Master. Deleting the folder by hand
+leaves settings and downloads behind.
+
 Full guide: https://github.com/Guernica4u/PKG-Master
 "@ | Set-Content -Encoding utf8 (Join-Path $stage "README.txt")
 

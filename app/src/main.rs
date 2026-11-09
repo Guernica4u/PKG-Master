@@ -789,7 +789,11 @@ impl App {
                         Ok(l) => {
                             self.status = match &l.key_problem {
                                 Some(Error::KeyRequired(_)) => {
-                                    Status::Err("This package is encrypted.".into())
+                                    Status::Err(if ps4 {
+                                        "This package needs to be decrypted. Press Run shadPKG (PS4) to decrypt it.".into()
+                                    } else {
+                                        "This package needs to be decrypted first.".into()
+                                    })
                                 }
                                 Some(e) => Status::Err(format!("That passcode didn't work: {e}")),
                                 None => Status::Ok(format!("Opened {}.", file_label(&path))),
@@ -1447,6 +1451,9 @@ impl App {
                 });
                 ui.add_space(4.0);
                 ui.weak("Unticked downloads, like AnyPS5 with your games' run folders, are kept.");
+                if cfg!(windows) {
+                    ui.weak("Windows can't delete a running program: its folder opens at the end, so delete pkgmaster-gui.exe there.");
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let red = RichText::new("Uninstall").color(Color32::from_rgb(0xD0, 0x3B, 0x3B)).strong();
@@ -1866,6 +1873,11 @@ fn elf_folder_for(base: &Path) -> PathBuf {
     parent.join(format!("{name}-elf"))
 }
 
+/// An eboot.bin by file name (any folder, any case).
+fn is_eboot(path: &str) -> bool {
+    path.rsplit(['/', '\\']).next().is_some_and(|n| n.eq_ignore_ascii_case("eboot.bin"))
+}
+
 fn is_pkg_path(p: &Path) -> bool {
     p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pkg"))
 }
@@ -1981,7 +1993,7 @@ const PROJECT_PAGE: &str = "https://github.com/Guernica4u/PKG-Master";
 
 /// What About says: the GitHub repository description, word for word.
 const ABOUT_DESCRIPTION: &str = "A tool for PS4/PS5 games that lets you seamlessly convert files \
-    (for example eboot.bin → eboot.elf), making it easier to use them with AnyPS5 and other projects \
+    (for example eboot.bin -> eboot.elf), making it easier to use them with AnyPS5 and other projects \
     without having to worry about encryption with ShadPKG (ShadPS4 support soon).";
 
 /// The user's rpcs3.exe: the one they picked, `PKGMASTER_RPCS3`, or an
@@ -2465,7 +2477,6 @@ impl eframe::App for App {
                     }
                 });
             }
-            ui.separator();
 
             if let Some(rows) = self.browse.clone() {
                 if rows.is_empty() {
@@ -2487,7 +2498,7 @@ impl eframe::App for App {
                                 clicked = Some(r.path.clone());
                             }
                             resp.context_menu(|ui| {
-                                if r.openable && !is_pkg_path(&r.path) && ui.button("Convert to ELF…").clicked() {
+                                if is_eboot(&r.name) && ui.button("Convert to ELF…").clicked() {
                                     action = Some(RowAction::ConvertFile(r.path.clone()));
                                     ui.close_menu();
                                 }
@@ -2507,8 +2518,28 @@ impl eframe::App for App {
             let Some(loaded) = &self.loaded else {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
-                    ui.heading("Drag a decrypted PS5/PS4 game or PKG file here");
-                    ui.weak("A PS3 game folder works too; you can also use Open file… or Open folder….");
+                    ui.heading("Drag PS5/PS4 packages here");
+                    ui.weak("Convert eboot.bin -> eboot.elf and run the game through emulators.");
+                    ui.add_space(16.0);
+                    for (what, does) in [
+                        ("eboot.bin", "Convert to ELF"),
+                        ("PS5 game folder", "Run in AnyPS5"),
+                        ("PS4 .pkg", "Run shadPKG to decrypt and extract it"),
+                        ("Fake / debug .pkg", "Unlock with its passcode, then convert or extract"),
+                        ("PS3 folder or .iso", "Run in RPCS3"),
+                    ] {
+                        // One label per row, so vertical_centered centers it.
+                        let mut row = egui::text::LayoutJob::default();
+                        let format = |color| egui::TextFormat { color, ..Default::default() };
+                        row.append(what, 0.0, format(ui.visuals().strong_text_color()));
+                        row.append(&format!("  ->  {does}"), 0.0, format(ui.visuals().text_color()));
+                        ui.label(row);
+                    }
+                    ui.add_space(16.0);
+                    ui.label(
+                        RichText::new("To remove PKG Master, use Uninstall in the menu at the top right. Deleting the folder leaves settings and downloads behind.")
+                            .color(Color32::from_rgb(0xE8, 0xB3, 0x2A)),
+                    );
                     if !self.library.entries.is_empty() {
                         ui.add_space(12.0);
                         ui.weak(format!("Your saved games are under {ICON_LIBRARY} Library."));
@@ -2584,10 +2615,17 @@ impl eframe::App for App {
                         (Some(p), true) => format!("Convert {} to ELF…", p.rsplit('/').next().unwrap_or(p)),
                         _ => "Convert to ELF…".to_string(),
                     };
-                    do_convert = ui
-                        .add_enabled(ready, egui::Button::new(RichText::new(label).size(15.0)))
-                        .on_hover_text("ELF is the file type AnyPS5 needs.")
-                        .clicked();
+                    // Convert is for eboot.bin only: the file opened, or the one selected inside.
+                    let eboot = match (&self.selected, has_files) {
+                        (Some(p), true) => is_eboot(p),
+                        _ => self.path.as_deref().is_some_and(|p| is_eboot(&p.to_string_lossy())),
+                    };
+                    if eboot {
+                        do_convert = ui
+                            .add_enabled(ready, egui::Button::new(RichText::new(label).size(15.0)))
+                            .on_hover_text("ELF is the file type AnyPS5 needs.")
+                            .clicked();
+                    }
                     // Only an unlocked package has files to extract.
                     if is_package {
                         do_extract = ui
@@ -2692,7 +2730,7 @@ impl eframe::App for App {
                                 clicked = Some(f.path.clone());
                             }
                             resp.context_menu(|ui| {
-                                if !ps3 && ui.add_enabled(!self.busy, egui::Button::new("Convert to ELF…")).clicked() {
+                                if is_eboot(&f.path) && ui.add_enabled(!self.busy, egui::Button::new("Convert to ELF…")).clicked() {
                                     menu_action = Some(RowAction::ConvertInner(f.path.clone()));
                                     ui.close_menu();
                                 }
