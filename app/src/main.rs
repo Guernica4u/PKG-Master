@@ -155,6 +155,8 @@ struct App {
     /// The ☰ menu's Settings and About windows.
     show_settings: bool,
     show_about: bool,
+    /// The start-up tip to uninstall from the menu, until "Never show again".
+    show_uninstall_tip: bool,
     /// ☰ > Uninstall: what would be deleted, and whether each is ticked.
     uninstall: Option<Vec<(uninstall::Item, bool)>>,
     /// Explain how to install the PS3 system software in RPCS3.
@@ -259,6 +261,7 @@ impl App {
             status: Status::Info(String::new()),
             tx,
             rx,
+            show_uninstall_tip: !settings.hide_uninstall_tip,
             settings,
             confirm: None,
             log: Vec::new(),
@@ -1427,6 +1430,52 @@ impl App {
         }
     }
 
+    /// Start-up popup: remove the app with the built-in uninstaller.
+    fn uninstall_tip_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_uninstall_tip {
+            return;
+        }
+        // Its own OS window, not one drawn inside the main window.
+        let size = egui::vec2(480.0, 220.0);
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title("Welcome to PKG Master")
+            .with_inner_size(size)
+            // Centered over the main window, which takes focus, so keep it in front.
+            .with_window_level(egui::WindowLevel::AlwaysOnTop)
+            .with_resizable(false)
+            .with_minimize_button(false)
+            .with_maximize_button(false);
+        if let Some(main) = ctx.input(|i| i.viewport().outer_rect) {
+            builder = builder.with_position(main.center() - size / 2.0);
+        }
+        let (ok, never) = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("uninstall_tip"), builder, |ctx, _| {
+            let (mut ok, mut never) = (ctx.input(|i| i.viewport().close_requested()), false);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.strong("Drop a file on the window:");
+                ui.add_space(4.0);
+                for (what, does) in WELCOME_ROWS {
+                    ui.label(welcome_row(ui, what, does));
+                }
+                ui.add_space(10.0);
+                ui.label("To remove PKG Master, use Uninstall in the menu at the top right.");
+                ui.label(RichText::new("Deleting the folder leaves settings and downloads behind.").color(Color32::from_rgb(0xE8, 0xB3, 0x2A)));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ok |= ui.button("OK").clicked();
+                    never = ui.button("Never show again").clicked();
+                });
+            });
+            (ok, never)
+        });
+        if never {
+            self.settings.hide_uninstall_tip = true;
+            let _ = self.settings.save(&settings_path());
+        }
+        if ok || never {
+            self.show_uninstall_tip = false;
+        }
+    }
+
     /// ☰ > Uninstall: what will be deleted, with the big downloads unticked.
     fn uninstall_ui(&mut self, ctx: &egui::Context) {
         let busy = self.busy || self.game_running();
@@ -1871,6 +1920,24 @@ fn elf_folder_for(base: &Path) -> PathBuf {
     let name = if base.is_dir() { base.file_name() } else { base.file_stem() };
     let name = name.map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "game".into());
     parent.join(format!("{name}-elf"))
+}
+
+/// What each kind of dropped file does: the start page and the welcome popup.
+const WELCOME_ROWS: [(&str, &str); 5] = [
+    ("eboot.bin", "Convert to ELF"),
+    ("PS5 game folder", "Run in AnyPS5"),
+    ("PS4 .pkg", "Run shadPKG to decrypt and extract it"),
+    ("Fake / debug .pkg", "Unlock with its passcode, then convert or extract"),
+    ("PS3 folder or .iso", "Run in RPCS3"),
+];
+
+/// "what  ->  does" as one label, so a centered layout centers the whole row.
+fn welcome_row(ui: &egui::Ui, what: &str, does: &str) -> egui::text::LayoutJob {
+    let mut row = egui::text::LayoutJob::default();
+    let format = |color| egui::TextFormat { color, ..Default::default() };
+    row.append(what, 0.0, format(ui.visuals().strong_text_color()));
+    row.append(&format!("  ->  {does}"), 0.0, format(ui.visuals().text_color()));
+    row
 }
 
 /// An eboot.bin by file name (any folder, any case).
@@ -2453,6 +2520,7 @@ impl eframe::App for App {
         self.settings_ui(ctx);
         self.about_ui(ctx);
         self.uninstall_ui(ctx);
+        self.uninstall_tip_ui(ctx);
         self.update_ui(ctx);
 
         self.actions_bottom = None;
@@ -2521,25 +2589,9 @@ impl eframe::App for App {
                     ui.heading("Drag PS5/PS4 packages here");
                     ui.weak("Convert eboot.bin -> eboot.elf and run the game through emulators.");
                     ui.add_space(16.0);
-                    for (what, does) in [
-                        ("eboot.bin", "Convert to ELF"),
-                        ("PS5 game folder", "Run in AnyPS5"),
-                        ("PS4 .pkg", "Run shadPKG to decrypt and extract it"),
-                        ("Fake / debug .pkg", "Unlock with its passcode, then convert or extract"),
-                        ("PS3 folder or .iso", "Run in RPCS3"),
-                    ] {
-                        // One label per row, so vertical_centered centers it.
-                        let mut row = egui::text::LayoutJob::default();
-                        let format = |color| egui::TextFormat { color, ..Default::default() };
-                        row.append(what, 0.0, format(ui.visuals().strong_text_color()));
-                        row.append(&format!("  ->  {does}"), 0.0, format(ui.visuals().text_color()));
-                        ui.label(row);
+                    for (what, does) in WELCOME_ROWS {
+                        ui.label(welcome_row(ui, what, does));
                     }
-                    ui.add_space(16.0);
-                    ui.label(
-                        RichText::new("To remove PKG Master, use Uninstall in the menu at the top right. Deleting the folder leaves settings and downloads behind.")
-                            .color(Color32::from_rgb(0xE8, 0xB3, 0x2A)),
-                    );
                     if !self.library.entries.is_empty() {
                         ui.add_space(12.0);
                         ui.weak(format!("Your saved games are under {ICON_LIBRARY} Library."));
