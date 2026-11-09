@@ -131,6 +131,8 @@ pub struct Settings {
     pub library_autostart: bool,
     /// Hide the log panel under the buttons.
     pub hide_log: bool,
+    /// "Never show again" on the start-up uninstall tip.
+    pub hide_uninstall_tip: bool,
     /// The main window's outer position in points, saved when it closes.
     pub window_pos: Option<(f32, f32)>,
     /// The main window's inner size in points, saved when it closes.
@@ -155,6 +157,7 @@ impl Settings {
                 "rpcs3" => s.rpcs3 = Some(PathBuf::from(v)),
                 "library_autostart" => s.library_autostart = v == "1",
                 "hide_log" => s.hide_log = v == "1",
+                "hide_uninstall_tip" => s.hide_uninstall_tip = v == "1",
                 "skip_version" => s.skip_version = Some(v.to_string()),
                 "window_pos" => s.window_pos = parse_pair(v),
                 "window_size" => s.window_size = parse_pair(v),
@@ -181,6 +184,7 @@ impl Settings {
         put("skip_version", self.skip_version.clone());
         put("library_autostart", self.library_autostart.then(|| "1".to_string()));
         put("hide_log", self.hide_log.then(|| "1".to_string()));
+        put("hide_uninstall_tip", self.hide_uninstall_tip.then(|| "1".to_string()));
         put("window_pos", self.window_pos.map(|(x, y)| format!("{x},{y}")));
         put("window_size", self.window_size.map(|(w, h)| format!("{w},{h}")));
         lines.push(String::new());

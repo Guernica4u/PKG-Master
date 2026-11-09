@@ -155,6 +155,8 @@ struct App {
     /// The ☰ menu's Settings and About windows.
     show_settings: bool,
     show_about: bool,
+    /// The start-up tip to uninstall from the menu, until "Never show again".
+    show_uninstall_tip: bool,
     /// ☰ > Uninstall: what would be deleted, and whether each is ticked.
     uninstall: Option<Vec<(uninstall::Item, bool)>>,
     /// Explain how to install the PS3 system software in RPCS3.
@@ -259,6 +261,7 @@ impl App {
             status: Status::Info(String::new()),
             tx,
             rx,
+            show_uninstall_tip: !settings.hide_uninstall_tip,
             settings,
             confirm: None,
             log: Vec::new(),
@@ -1427,6 +1430,35 @@ impl App {
         }
     }
 
+    /// Start-up popup: remove the app with the built-in uninstaller.
+    fn uninstall_tip_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_uninstall_tip {
+            return;
+        }
+        let (mut ok, mut never) = (false, false);
+        egui::Window::new("Removing PKG Master")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(380.0);
+                ui.label("To remove PKG Master, use Uninstall in the menu at the top right.");
+                ui.label(RichText::new("Deleting the folder leaves settings and downloads behind.").color(Color32::from_rgb(0xE8, 0xB3, 0x2A)));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ok = ui.button("OK").clicked();
+                    never = ui.button("Never show again").clicked();
+                });
+            });
+        if never {
+            self.settings.hide_uninstall_tip = true;
+            let _ = self.settings.save(&settings_path());
+        }
+        if ok || never {
+            self.show_uninstall_tip = false;
+        }
+    }
+
     /// ☰ > Uninstall: what will be deleted, with the big downloads unticked.
     fn uninstall_ui(&mut self, ctx: &egui::Context) {
         let busy = self.busy || self.game_running();
@@ -2453,6 +2485,7 @@ impl eframe::App for App {
         self.settings_ui(ctx);
         self.about_ui(ctx);
         self.uninstall_ui(ctx);
+        self.uninstall_tip_ui(ctx);
         self.update_ui(ctx);
 
         self.actions_bottom = None;
@@ -2535,11 +2568,6 @@ impl eframe::App for App {
                         row.append(&format!("  ->  {does}"), 0.0, format(ui.visuals().text_color()));
                         ui.label(row);
                     }
-                    ui.add_space(16.0);
-                    ui.label(
-                        RichText::new("To remove PKG Master, use Uninstall in the menu at the top right. Deleting the folder leaves settings and downloads behind.")
-                            .color(Color32::from_rgb(0xE8, 0xB3, 0x2A)),
-                    );
                     if !self.library.entries.is_empty() {
                         ui.add_space(12.0);
                         ui.weak(format!("Your saved games are under {ICON_LIBRARY} Library."));
