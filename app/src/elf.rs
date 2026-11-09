@@ -240,8 +240,7 @@ pub fn to_elf(d: &[u8]) -> Result<Conversion> {
         .collect();
     if !blocked.is_empty() {
         return Err(Error::Unsupported(format!(
-            "SELF segments {} are encrypted or compressed; rebuilding a plain ELF needs \
-             console-side keys, which pkgmaster does not include",
+            "SELF segments {} are encrypted or compressed; decrypt this file first",
             blocked.join(", ")
         )));
     }

@@ -147,39 +147,57 @@ pub fn folders() -> Vec<PathBuf> {
     dirs
 }
 
-/// On Windows the running program can't delete itself: a hidden PowerShell
-/// waits for it to exit, deletes what is left (and shortcuts to the
-/// program), removes the emptied folders, then deletes its own script.
+/// Windows won't let a running program delete itself, and a hidden helper
+/// script that does it looks like malware to antivirus. So shortcuts go now,
+/// and what is still locked (the program) is shown in Explorer to delete.
 #[cfg(windows)]
-pub fn finish_after_exit(leftovers: &[PathBuf], dirs: &[PathBuf]) -> std::io::Result<()> {
-    use std::os::windows::process::CommandExt;
-    let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', "''"));
-    let list = |ps: &[PathBuf]| ps.iter().map(|p| quote(p)).collect::<Vec<_>>().join(",");
+pub fn finish_after_exit(leftovers: &[PathBuf], _dirs: &[PathBuf]) -> std::io::Result<()> {
     let exe = crate::update::program_path()?;
-    let script = std::env::temp_dir().join(format!("pkgmaster-uninstall-{}.ps1", std::process::id()));
-    let body = format!(
-        "$ErrorActionPreference = 'SilentlyContinue'\r\n\
-         Wait-Process -Id {pid} -Timeout 60\r\n\
-         foreach ($p in @({leftovers})) {{ Remove-Item -LiteralPath $p -Recurse -Force }}\r\n\
-         $sh = New-Object -ComObject WScript.Shell\r\n\
-         foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {{\r\n\
-           Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse | Where-Object {{ $sh.CreateShortcut($_.FullName).TargetPath -eq {exe} }} | Remove-Item -Force\r\n\
-         }}\r\n\
-         foreach ($d in @({dirs})) {{ if (-not (Get-ChildItem -LiteralPath $d -Force)) {{ Remove-Item -LiteralPath $d -Force }} }}\r\n\
-         Remove-Item -LiteralPath $PSCommandPath -Force\r\n",
-        pid = std::process::id(),
-        leftovers = list(leftovers),
-        exe = quote(&exe),
-        dirs = list(dirs),
-    );
-    fs::write(&script, body)?;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
-        .arg(&script)
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()?;
+    for lnk in shortcuts().into_iter().filter(|l| fs::read(l).is_ok_and(|b| lnk_points_to(&b, &exe))) {
+        let _ = fs::remove_file(lnk);
+    }
+    if let Some(first) = leftovers.first() {
+        std::process::Command::new("explorer").arg(format!("/select,{}", first.display())).spawn()?;
+    }
     Ok(())
+}
+
+/// .lnk files on the Desktop and in the Start menu.
+/// shortcut: fixed folder names, not the known-folder API; a moved Desktop is missed.
+#[cfg(windows)]
+fn shortcuts() -> Vec<PathBuf> {
+    let env = |k| std::env::var_os(k).map(PathBuf::from);
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    dirs.extend(env("USERPROFILE").map(|h| h.join("Desktop")));
+    dirs.extend(env("OneDrive").map(|h| h.join("Desktop")));
+    dirs.extend(env("APPDATA").map(|a| a.join(r"Microsoft\Windows\Start Menu\Programs")));
+    let mut found = Vec::new();
+    while let Some(d) = dirs.pop() {
+        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")) {
+                found.push(p);
+            }
+        }
+    }
+    found
+}
+
+/// Whether a .lnk file's bytes name `exe`: shortcuts store the target path
+/// as ANSI (LinkInfo) and/or UTF-16 (string data). Case doesn't matter.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn lnk_points_to(bytes: &[u8], exe: &Path) -> bool {
+    let target = exe.to_string_lossy().to_lowercase();
+    let utf16 = |b: &[u8]| {
+        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&units).to_lowercase()
+    };
+    // UTF-16 text can start on an odd byte, so try both alignments.
+    String::from_utf8_lossy(bytes).to_lowercase().contains(&target)
+        || utf16(bytes).contains(&target)
+        || utf16(bytes.get(1..).unwrap_or_default()).contains(&target)
 }
 
 /// Linux deletes a running program's file without trouble, so nothing is
@@ -246,5 +264,18 @@ mod tests {
         assert!(!local.join("half.zip.part").exists());
         assert!(root.join("unrelated.txt").exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn finds_the_target_in_a_shortcut() {
+        let exe = Path::new(r"C:\Games\PKG Master\pkgmaster-gui.exe");
+        let wide: Vec<u8> = r"c:\games\pkg master\PKGMASTER-GUI.EXE".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        for pad in [0usize, 1] {
+            let mut lnk = vec![0x4c; pad + 3];
+            lnk.extend(&wide);
+            assert!(lnk_points_to(&lnk, exe), "utf-16 at offset {pad}");
+        }
+        assert!(lnk_points_to(br"..C:\Games\PKG Master\pkgmaster-gui.exe\0", exe));
+        assert!(!lnk_points_to(br"..C:\Other\pkgmaster-gui.exe\0", exe));
     }
 }

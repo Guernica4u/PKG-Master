@@ -31,18 +31,22 @@ PKG Master v$version for Linux
 
 Run ./pkgmaster-gui. Nothing to install.
 
-- Open file... / Open folder...: a fake-signed or debug .pkg, or a decrypted
-  game folder you dumped yourself (PS4, PS5 or PS3).
-- Convert to ELF...: eboot.bin -> standard ELF (the file type AnyPS5 needs).
-- Run in AnyPS5...: needs AnyPS5 (https://github.com/boykopovar/AnyPS5/releases).
-  The first time, the app offers to download the official Linux release.
-- Run in RPCS3: plays a PS3 game you dumped, with RPCS3 (https://rpcs3.net).
-- Run shadPKG (PS4)...: put your own shadPKG (from
-  https://github.com/seregonwar/ShadPKG/releases) in the shadpkg folder.
-- Settings, History and the Library are kept in ~/.config/pkg-master.
-  Menu > Uninstall PKG Master removes everything the app saved.
+Drop a file on the window:
+  eboot.bin            -> Convert to ELF
+  PS5 game folder      -> Run in AnyPS5, then Launch
+  PS4 .pkg             -> Run shadPKG (PS4) to decrypt and extract it
+  fake / debug .pkg    -> passcode (often 32 zeros), then convert or extract
+  PS3 folder or .iso   -> Run in RPCS3
 
-No Sony keys are included; retail packages can't be decrypted.
+Emulators aren't included. The app downloads the official release when
+you ask. shadPKG: get it from https://github.com/seregonwar/ShadPKG/releases
+and put it in the shadpkg folder.
+
+Command line: ./pkgmaster-cli convert eboot.bin eboot.elf
+
+Uninstall with Menu > Uninstall PKG Master. Deleting the folder by hand
+leaves settings (~/.config/pkg-master) and downloads behind.
+
 Full guide: https://github.com/Guernica4u/PKG-Master
 EOF
 tar -C "$dist" -czf "$dist/$name-linux-x64.tar.gz" "$name"
