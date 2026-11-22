@@ -198,11 +198,15 @@ fn settings_round_trip() {
 }
 
 fn mock_relinker() -> PathBuf {
-    // target/debug/deps/<test>.exe -> target/debug/examples/mock_relinker.exe
-    let deps = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
-    let exe = deps.parent().unwrap().join("examples").join(format!("mock_relinker{}", std::env::consts::EXE_SUFFIX));
-    assert!(exe.is_file(), "{} was not built; run `cargo test`", exe.display());
-    exe
+    // target/debug/examples/mock_relinker.exe, a few folders above the test
+    // binary (deps/ in older Cargo, build/<pkg>/<hash>/ in newer).
+    let name = format!("mock_relinker{}", std::env::consts::EXE_SUFFIX);
+    let test_exe = std::env::current_exe().unwrap();
+    test_exe
+        .ancestors()
+        .map(|d| d.join("examples").join(&name))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| panic!("examples/{name} was not built near {}; run `cargo test`", test_exe.display()))
 }
 
 const RELINKER_NAME: &str = if cfg!(windows) { "relinker-v0.1.2.exe" } else { "relinker-v0.1.2" };
