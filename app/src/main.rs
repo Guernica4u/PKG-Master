@@ -2205,14 +2205,14 @@ fn apply_theme(ctx: &egui::Context) {
     }
     ctx.set_visuals(v);
     ctx.style_mut(|s| {
-        s.spacing.button_padding = egui::vec2(8.0, 3.0);
+        s.spacing.button_padding = egui::vec2(8.0, 1.0);
         s.spacing.item_spacing = egui::vec2(8.0, 5.0);
     });
 }
 
 /// The page's main action: white with dark text, so it stands out from the outlined buttons.
 fn primary(text: &str) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text).size(15.0).color(Color32::from_rgb(0x12, 0x12, 0x15)))
+    egui::Button::new(RichText::new(text).size(14.0).color(Color32::from_rgb(0x12, 0x12, 0x15)))
         .fill(Color32::from_rgb(0xEE, 0xEE, 0xF0))
         .stroke(egui::Stroke::NONE)
 }
@@ -2970,7 +2970,7 @@ impl eframe::App for App {
                     // Only an unlocked package has files to extract.
                     if is_package {
                         do_extract = ui
-                            .add_enabled(ready, egui::Button::new(RichText::new("Extract all files…").size(15.0)))
+                            .add_enabled(ready, egui::Button::new(RichText::new("Extract all files…").size(14.0)))
                             .on_hover_text("Unpacks everything inside the .pkg into a normal folder.")
                             .clicked();
                     }
@@ -2983,12 +2983,12 @@ impl eframe::App for App {
                         .on_hover_text("Plays this game in your RPCS3 and saves it to your Library.")
                         .clicked();
                     if running {
-                        do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
+                        do_stop = ui.button(RichText::new("Stop").size(14.0)).clicked();
                     }
                     match &rpcs3_exe {
                         Some(exe) => {
                             do_pick_rpcs3 = ui
-                                .add_enabled(!self.busy, egui::Link::new(RichText::new(format!("RPCS3: {}", exe.display())).monospace()))
+                                .add_enabled(!self.busy, egui::Link::new(RichText::new(format!("RPCS3: {}", exe.display())).monospace().small().underline()))
                                 .on_hover_text("Click to change.")
                                 .clicked();
                         }
@@ -3013,7 +3013,7 @@ impl eframe::App for App {
                     let can_launch = !self.busy && !running && run_dir.is_some();
                     do_launch = ui.add_enabled(can_launch, primary("Launch")).clicked();
                     if running {
-                        do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
+                        do_stop = ui.button(RichText::new("Stop").size(14.0)).clicked();
                     }
                     match (anyps5_release.as_ref(), &self.settings.anyps5_dir) {
                         // Once set, the button is replaced by the path; click it to change.
@@ -3021,7 +3021,7 @@ impl eframe::App for App {
                             do_pick_anyps5 = ui
                                 .add_enabled(
                                     !self.busy,
-                                    egui::Link::new(RichText::new(format!("AnyPS5: {}", dir.display())).monospace()),
+                                    egui::Link::new(RichText::new(format!("AnyPS5: {}", dir.display())).monospace().small().underline()),
                                 )
                                 .on_hover_text(format!(
                                     "Click to change.\nrelinker: {}\nlibs: {}",
