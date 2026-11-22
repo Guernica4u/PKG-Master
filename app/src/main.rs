@@ -2171,7 +2171,7 @@ fn readme_line(ui: &mut egui::Ui) {
     }
 }
 
-/// Quiet graphite theme: neutral greys, white for emphasis, no colored accent.
+/// Quiet graphite theme: neutral greys, outlined buttons, white for the main action.
 fn apply_theme(ctx: &egui::Context) {
     let grey = |v: u8| Color32::from_rgb(v, v, v.saturating_add(3));
     let mut v = egui::Visuals::dark();
@@ -2189,27 +2189,32 @@ fn apply_theme(ctx: &egui::Context) {
     v.window_shadow = egui::epaint::Shadow::NONE;
     v.popup_shadow = egui::epaint::Shadow::NONE;
     let w = &mut v.widgets;
-    for (state, fill, text) in [
-        (&mut w.noninteractive, grey(0x12), grey(0xB4)),
-        (&mut w.inactive, grey(0x22), grey(0xE4)),
-        (&mut w.hovered, grey(0x2C), Color32::WHITE),
-        (&mut w.active, grey(0x36), Color32::WHITE),
-        (&mut w.open, grey(0x26), Color32::WHITE),
+    for (state, fill, stroke, text) in [
+        (&mut w.noninteractive, grey(0x12), grey(0x26), grey(0xB4)),
+        (&mut w.inactive, grey(0x1A), grey(0x34), grey(0xE4)),
+        (&mut w.hovered, grey(0x24), grey(0x5A), Color32::WHITE),
+        (&mut w.active, grey(0x2E), grey(0x70), Color32::WHITE),
+        (&mut w.open, grey(0x22), grey(0x44), Color32::WHITE),
     ] {
         state.weak_bg_fill = fill;
         state.bg_fill = fill;
-        state.bg_stroke = egui::Stroke::NONE;
+        state.bg_stroke = egui::Stroke::new(1.0_f32, stroke);
         state.fg_stroke = egui::Stroke::new(1.0_f32, text);
         state.corner_radius = 4.into();
         state.expansion = 0.0;
     }
-    w.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, grey(0x26));
-    w.hovered.bg_stroke = egui::Stroke::new(1.0_f32, grey(0x44));
     ctx.set_visuals(v);
     ctx.style_mut(|s| {
-        s.spacing.button_padding = egui::vec2(10.0, 5.0);
-        s.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        s.spacing.button_padding = egui::vec2(8.0, 3.0);
+        s.spacing.item_spacing = egui::vec2(8.0, 5.0);
     });
+}
+
+/// The page's main action: white with dark text, so it stands out from the outlined buttons.
+fn primary(text: &str) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text).size(15.0).color(Color32::from_rgb(0x12, 0x12, 0x15)))
+        .fill(Color32::from_rgb(0xEE, 0xEE, 0xF0))
+        .stroke(egui::Stroke::NONE)
 }
 
 /// The game's background picture filling the page, dimmed so text stays readable.
@@ -2221,7 +2226,7 @@ fn paint_background(ui: &egui::Ui, tex: &egui::TextureHandle) {
     let painter = ui.painter_at(rect);
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     painter.image(tex.id(), img, uv, Color32::WHITE);
-    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(170));
+    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(140));
 }
 
 /// The empty Library's drop area: a rounded box around what's drawn inside.
@@ -2889,14 +2894,14 @@ impl eframe::App for App {
             let starred = self.path.as_deref().is_some_and(|p| self.library.contains(p));
             ui.horizontal(|ui| {
                 if let Some(tex) = &self.icon_tex {
-                    ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(88.0, 88.0)));
+                    ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(112.0, 112.0)).corner_radius(10));
                 }
                 ui.vertical(|ui| {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let fallback = self.path.as_deref().map(file_label).unwrap_or_default();
                         let title = loaded.info.title.clone().unwrap_or(fallback);
-                        ui.label(RichText::new(title).size(22.0).strong());
+                        ui.label(RichText::new(title).size(28.0).strong().color(Color32::WHITE));
                         let star = RichText::new(if starred { ICON_STARRED } else { ICON_STAR })
                             .size(22.0)
                             .color(if starred { Color32::from_rgb(0xE8, 0xB3, 0x2A) } else { ui.visuals().weak_text_color() });
@@ -2921,7 +2926,7 @@ impl eframe::App for App {
 
             egui::Grid::new("info").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
                 for (k, v) in &loaded.rows {
-                    ui.strong(k);
+                    ui.weak(k);
                     ui.label(v);
                     ui.end_row();
                 }
@@ -2958,7 +2963,7 @@ impl eframe::App for App {
                     };
                     if eboot {
                         do_convert = ui
-                            .add_enabled(ready, egui::Button::new(RichText::new(label).size(15.0)))
+                            .add_enabled(ready, primary(&label))
                             .on_hover_text("ELF is the file type AnyPS5 needs.")
                             .clicked();
                     }
@@ -2974,7 +2979,7 @@ impl eframe::App for App {
             if ps3 {
                 ui.horizontal(|ui| {
                     do_rpcs3 = ui
-                        .add_enabled(ready && !running, egui::Button::new(RichText::new("Run in RPCS3").size(15.0)))
+                        .add_enabled(ready && !running, primary("Run in RPCS3"))
                         .on_hover_text("Plays this game in your RPCS3 and saves it to your Library.")
                         .clicked();
                     if running {
@@ -2996,7 +3001,7 @@ impl eframe::App for App {
                     do_run = ui
                         .add_enabled(
                             ready && is_folder && !running,
-                            egui::Button::new(RichText::new("Run in AnyPS5…").size(15.0)),
+                            primary("Run in AnyPS5…"),
                         )
                         .on_hover_text(
                             "Converts the game's executables, runs your AnyPS5 relinker on them and lays out \
@@ -3006,7 +3011,7 @@ impl eframe::App for App {
                         .clicked();
                     // Launch belongs to the open game: its own run folder, if it has one.
                     let can_launch = !self.busy && !running && run_dir.is_some();
-                    do_launch = ui.add_enabled(can_launch, egui::Button::new(RichText::new("Launch").size(15.0))).clicked();
+                    do_launch = ui.add_enabled(can_launch, primary("Launch")).clicked();
                     if running {
                         do_stop = ui.button(RichText::new("Stop").size(15.0)).clicked();
                     }
