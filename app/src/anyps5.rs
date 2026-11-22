@@ -86,20 +86,26 @@ pub fn local_data_dir() -> Option<PathBuf> {
     user_dir(true)
 }
 
-#[cfg(windows)]
 fn user_dir(local: bool) -> Option<PathBuf> {
-    std::env::var_os(if local { "LOCALAPPDATA" } else { "APPDATA" }).map(|d| PathBuf::from(d).join("PKG Master"))
+    app_user_dir(local, ("PKG Master", "pkg-master"))
+}
+
+/// An app's folder under %APPDATA% (or %LOCALAPPDATA% when `local`); `names`
+/// is (Windows name, Linux name).
+#[cfg(windows)]
+pub fn app_user_dir(local: bool, names: (&str, &str)) -> Option<PathBuf> {
+    std::env::var_os(if local { "LOCALAPPDATA" } else { "APPDATA" }).map(|d| PathBuf::from(d).join(names.0))
 }
 
 /// The XDG folders: `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME`, or their defaults under `$HOME`.
 #[cfg(not(windows))]
-fn user_dir(local: bool) -> Option<PathBuf> {
+pub fn app_user_dir(local: bool, names: (&str, &str)) -> Option<PathBuf> {
     let (var, default) = if local { ("XDG_DATA_HOME", ".local/share") } else { ("XDG_CONFIG_HOME", ".config") };
     std::env::var_os(var)
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(default)))
-        .map(|d| d.join("pkg-master"))
+        .map(|d| d.join(names.1))
 }
 
 /// Make a downloaded program runnable (zip and HTTP downloads lose the mode).
@@ -133,6 +139,8 @@ pub struct Settings {
     pub hide_log: bool,
     /// "Never show again" on the start-up uninstall tip.
     pub hide_uninstall_tip: bool,
+    /// "Don't ask again" on the start-up offer to switch to PS5toPC.
+    pub hide_switch_offer: bool,
     /// The main window's outer position in points, saved when it closes.
     pub window_pos: Option<(f32, f32)>,
     /// The main window's inner size in points, saved when it closes.
@@ -158,6 +166,7 @@ impl Settings {
                 "library_autostart" => s.library_autostart = v == "1",
                 "hide_log" => s.hide_log = v == "1",
                 "hide_uninstall_tip" => s.hide_uninstall_tip = v == "1",
+                "hide_switch_offer" => s.hide_switch_offer = v == "1",
                 "skip_version" => s.skip_version = Some(v.to_string()),
                 "window_pos" => s.window_pos = parse_pair(v),
                 "window_size" => s.window_size = parse_pair(v),
@@ -185,6 +194,7 @@ impl Settings {
         put("library_autostart", self.library_autostart.then(|| "1".to_string()));
         put("hide_log", self.hide_log.then(|| "1".to_string()));
         put("hide_uninstall_tip", self.hide_uninstall_tip.then(|| "1".to_string()));
+        put("hide_switch_offer", self.hide_switch_offer.then(|| "1".to_string()));
         put("window_pos", self.window_pos.map(|(x, y)| format!("{x},{y}")));
         put("window_size", self.window_size.map(|(w, h)| format!("{w},{h}")));
         lines.push(String::new());
