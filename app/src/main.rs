@@ -2171,34 +2171,40 @@ fn readme_line(ui: &mut egui::Ui) {
     }
 }
 
-/// Dark panels, rounder widgets and a blue accent instead of stock egui grey.
+/// Quiet graphite theme: neutral greys, white for emphasis, no colored accent.
 fn apply_theme(ctx: &egui::Context) {
-    let rgb = Color32::from_rgb;
-    let accent = rgb(0x1F, 0x6F, 0xEB);
+    let grey = |v: u8| Color32::from_rgb(v, v, v.saturating_add(3));
     let mut v = egui::Visuals::dark();
-    v.panel_fill = rgb(0x14, 0x17, 0x1C);
-    v.window_fill = rgb(0x1B, 0x1F, 0x26);
-    v.extreme_bg_color = rgb(0x0E, 0x10, 0x14);
-    v.faint_bg_color = rgb(0x1E, 0x23, 0x2B);
-    v.selection.bg_fill = accent;
-    v.hyperlink_color = rgb(0x6C, 0xB4, 0xFF);
-    v.window_corner_radius = 10.into();
-    v.menu_corner_radius = 8.into();
+    v.panel_fill = grey(0x12);
+    v.window_fill = grey(0x18);
+    v.extreme_bg_color = grey(0x0C);
+    v.faint_bg_color = grey(0x17);
+    v.code_bg_color = grey(0x1C);
+    v.selection.bg_fill = grey(0x3A);
+    v.selection.stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
+    v.hyperlink_color = grey(0xE6);
+    v.window_stroke = egui::Stroke::new(1.0_f32, grey(0x2A));
+    v.window_corner_radius = 8.into();
+    v.menu_corner_radius = 6.into();
+    v.window_shadow = egui::epaint::Shadow::NONE;
+    v.popup_shadow = egui::epaint::Shadow::NONE;
     let w = &mut v.widgets;
-    for (state, fill) in [
-        (&mut w.inactive, rgb(0x26, 0x2C, 0x36)),
-        (&mut w.hovered, rgb(0x31, 0x3A, 0x48)),
-        (&mut w.active, accent),
-        (&mut w.open, rgb(0x31, 0x3A, 0x48)),
+    for (state, fill, text) in [
+        (&mut w.noninteractive, grey(0x12), grey(0xB4)),
+        (&mut w.inactive, grey(0x22), grey(0xE4)),
+        (&mut w.hovered, grey(0x2C), Color32::WHITE),
+        (&mut w.active, grey(0x36), Color32::WHITE),
+        (&mut w.open, grey(0x26), Color32::WHITE),
     ] {
         state.weak_bg_fill = fill;
         state.bg_fill = fill;
         state.bg_stroke = egui::Stroke::NONE;
-        state.corner_radius = 6.into();
+        state.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        state.corner_radius = 4.into();
+        state.expansion = 0.0;
     }
-    w.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent);
-    w.noninteractive.corner_radius = 6.into();
-    w.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, rgb(0x2A, 0x30, 0x3A));
+    w.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, grey(0x26));
+    w.hovered.bg_stroke = egui::Stroke::new(1.0_f32, grey(0x44));
     ctx.set_visuals(v);
     ctx.style_mut(|s| {
         s.spacing.button_padding = egui::vec2(10.0, 5.0);
@@ -2221,9 +2227,8 @@ fn paint_background(ui: &egui::Ui, tex: &egui::TextureHandle) {
 /// The empty Library's drop area: a rounded box around what's drawn inside.
 fn drop_zone(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(egui::Stroke::new(1.5_f32, ui.visuals().widgets.noninteractive.bg_stroke.color))
-        .corner_radius(12)
+        .stroke(egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color))
+        .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(32, 28))
         .show(ui, |ui| ui.vertical_centered(add));
 }
