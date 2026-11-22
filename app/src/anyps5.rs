@@ -135,6 +135,10 @@ pub struct Settings {
     pub skip_version: Option<String>,
     /// Clicking a Library game also starts it (AnyPS5 or RPCS3).
     pub library_autostart: bool,
+    /// Where the user keeps their games; scanned into the Library at start.
+    pub games_dir: Option<PathBuf>,
+    /// Don't play a game's menu music when it's open.
+    pub mute_music: bool,
     /// Hide the log panel under the buttons.
     pub hide_log: bool,
     /// "Never show again" on the start-up uninstall tip.
@@ -164,6 +168,8 @@ impl Settings {
                 "anyps5_version" => s.anyps5_version = Some(v.to_string()),
                 "rpcs3" => s.rpcs3 = Some(PathBuf::from(v)),
                 "library_autostart" => s.library_autostart = v == "1",
+                "games_dir" => s.games_dir = Some(PathBuf::from(v)),
+                "mute_music" => s.mute_music = v == "1",
                 "hide_log" => s.hide_log = v == "1",
                 "hide_uninstall_tip" => s.hide_uninstall_tip = v == "1",
                 "hide_switch_offer" => s.hide_switch_offer = v == "1",
@@ -192,6 +198,8 @@ impl Settings {
         put("rpcs3", self.rpcs3.as_ref().map(|r| r.display().to_string()));
         put("skip_version", self.skip_version.clone());
         put("library_autostart", self.library_autostart.then(|| "1".to_string()));
+        put("games_dir", self.games_dir.as_ref().map(|d| d.display().to_string()));
+        put("mute_music", self.mute_music.then(|| "1".to_string()));
         put("hide_log", self.hide_log.then(|| "1".to_string()));
         put("hide_uninstall_tip", self.hide_uninstall_tip.then(|| "1".to_string()));
         put("hide_switch_offer", self.hide_switch_offer.then(|| "1".to_string()));

@@ -35,6 +35,8 @@ needs the free [PS3 system software](https://www.playstation.com/en-us/support/h
 
 ## Good to know
 
+- **Library:** pick your games folder on first launch (or in Settings) and your games show up on the home page. Open one and its menu music and background play, like on the console.
+
 - **Uninstall** from the **☰** menu, not by deleting the folder, or your
   settings and downloads get left behind.
 - **Windows says it's a virus?** It's a false alarm because the app is new and
