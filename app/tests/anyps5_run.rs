@@ -189,6 +189,7 @@ fn settings_round_trip() {
         library_autostart: true,
         hide_log: true,
         hide_uninstall_tip: true,
+        hide_switch_offer: true,
         window_pos: Some((12.0, -40.0)),
         window_size: Some((1024.0, 700.0)),
     };
