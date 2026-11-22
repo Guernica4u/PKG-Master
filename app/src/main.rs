@@ -21,12 +21,13 @@ use pkgmaster::anyps5::{
 };
 use pkgmaster::binary::fmt_size;
 use pkgmaster::convert::{
-    convert_to_elf_cancellable, default_output_name, extract_all_cancellable, load, ps3_game_dir, Input, Loaded,
+    convert_to_elf_cancellable, default_output_name, extract_all_cancellable, home_media, load, ps3_game_dir, Input, Loaded,
     JOB_CANCELLED,
 };
 use pkgmaster::download::{Release, CANCELLED};
 use pkgmaster::history::{ago, History};
 use pkgmaster::library::{Entry, Library};
+use pkgmaster::media::Music;
 use pkgmaster::{switch, uninstall, update};
 use pkgmaster::Error;
 
@@ -73,8 +74,9 @@ fn window_icon() -> egui::IconData {
 }
 
 enum Msg {
-    /// A load finished; the flag says whether it is a PS4 game.
-    Loaded(PathBuf, Result<Loaded, Error>, bool),
+    /// A load finished; the flag says whether it is a PS4 game. Then the
+    /// game's background picture and menu music, if it has them.
+    Loaded(PathBuf, Result<Loaded, Error>, bool, (Option<image::RgbaImage>, Option<Music>)),
     /// "Download for me" or an AnyPS5 update finished: the AnyPS5 folder
     /// and release tag, or why not.
     AnyPs5Installed(Result<(PathBuf, String), Error>),
@@ -222,6 +224,10 @@ struct App {
     paths: PathCache,
     /// The saved window position has been checked against the monitor once.
     window_checked: bool,
+    /// The open game's background picture, drawn behind its page.
+    background: Option<egui::TextureHandle>,
+    /// The open game's menu music while it plays (dropping it stops it).
+    music: Option<(rodio::OutputStream, rodio::Sink)>,
 }
 
 /// Filesystem answers the toolbar asks for every frame. Each is worked out
@@ -308,6 +314,64 @@ impl App {
             anyps5_update: None,
             paths: PathCache::default(),
             window_checked: false,
+            background: None,
+            music: None,
+        }
+    }
+
+    /// Loop a game's menu music, unless it's muted in Settings.
+    fn play_music(&mut self, music: Option<Music>) {
+        self.music = None;
+        let Some(m) = music.filter(|_| !self.settings.mute_music) else { return };
+        // No sound device just means no music.
+        let Ok(mut stream) = rodio::OutputStreamBuilder::open_default_stream() else { return };
+        stream.log_on_drop(false);
+        let sink = rodio::Sink::connect_new(stream.mixer());
+        sink.set_volume(0.6);
+        sink.append(rodio::Source::repeat_infinite(rodio::buffer::SamplesBuffer::new(m.channels, m.rate, m.samples)));
+        self.music = Some((stream, sink));
+    }
+
+    /// Close what's open and show the Library.
+    fn go_home(&mut self) {
+        if let Some(p) = self.path.take() {
+            if self.back_stack.last() != Some(&p) {
+                self.back_stack.push(p);
+            }
+        }
+        self.loaded = None;
+        self.browse = None;
+        self.icon_tex = None;
+        self.is_ps4 = false;
+        self.selected = None;
+        self.background = None;
+        self.music = None;
+        self.status = Status::Info(String::new());
+        self.clear_path_cache();
+    }
+
+    fn pick_games_dir(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("Pick the folder where you keep your games");
+        if let Some(dir) = &self.settings.games_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(dir) = dialog.pick_folder() {
+            self.settings.games_dir = Some(dir);
+            let _ = self.settings.save(&settings_path());
+            self.scan_games();
+        }
+    }
+
+    /// Add the games in the games folder that aren't in the Library yet.
+    fn scan_games(&mut self) {
+        let Some(dir) = self.settings.games_dir.clone() else { return };
+        // shortcut: scans on the UI thread; fine for a few hundred folders, move to a thread if it stalls.
+        let added = self.library.add_folder(&dir);
+        if added > 0 {
+            let _ = self.library.save();
+            self.status = Status::Ok(format!("Added {added} game(s) from {}.", dir.display()));
+        } else if !dir.is_dir() {
+            self.status = Status::Err(format!("The games folder {} isn't there.", dir.display()));
         }
     }
 
@@ -326,6 +390,8 @@ impl App {
     /// Back and Refresh pass `auto = false` so they show the folder itself.
     fn open(&mut self, ctx: &egui::Context, path: PathBuf, auto: bool) {
         self.clear_path_cache();
+        self.background = None;
+        self.music = None;
         // Something new: remember what was open for Back, and fold the log away.
         if let Some(prev) = self.path.clone().filter(|p| *p != path) {
             if self.back_stack.last() != Some(&prev) {
@@ -372,7 +438,8 @@ impl App {
         thread::spawn(move || {
             let result = load(&path, passcode.as_deref());
             let ps4 = result.as_ref().is_ok_and(looks_ps4);
-            let _ = tx.send(Msg::Loaded(path, result, ps4));
+            let media = result.as_ref().ok().and_then(|l| l.input.as_ref()).map(home_media).unwrap_or_default();
+            let _ = tx.send(Msg::Loaded(path, result, ps4, media));
             ctx.request_repaint();
         });
     }
@@ -794,7 +861,7 @@ impl App {
     fn handle_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Loaded(path, result, ps4) => {
+                Msg::Loaded(path, result, ps4, (background, music)) => {
                     self.busy = false;
                     if self.path.as_deref() != Some(path.as_path()) {
                         continue;
@@ -816,6 +883,11 @@ impl App {
                             self.loaded = Some(l);
                             self.icon_tex = None;
                             self.is_ps4 = ps4;
+                            self.background = background.map(|img| {
+                                let image = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], &img);
+                                ctx.load_texture("game-background", image, egui::TextureOptions::LINEAR)
+                            });
+                            self.play_music(music);
                         }
                         Err(e) => self.status = Status::Err(describe_error(&e)),
                     }
@@ -1065,25 +1137,53 @@ impl App {
             .clone()
     }
 
-    /// The Library dropdown: the saved games as tiles, three across, two
-    /// rows visible at a time. Returns what was picked.
-    fn library_menu(&mut self, ui: &mut egui::Ui) -> Option<LibraryAction> {
+    /// The home page: the Library, or how to fill it while it's empty.
+    fn library_home(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let mut pick = false;
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.heading("Library");
+            if self.settings.games_dir.is_some() && ui.small_button("Rescan").on_hover_text("Look for new games in your games folder").clicked() {
+                self.scan_games();
+            }
+            ui.weak("Drop a game folder or eboot.bin anywhere to open it.");
+        });
+        ui.add_space(8.0);
+        if self.library.entries.is_empty() {
+            ui.add_space(30.0);
+            drop_zone(ui, |ui| {
+                ui.label(RichText::new("No games yet").size(22.0).strong());
+                ui.add_space(4.0);
+                ui.weak("Pick the folder where you keep your games, or drag one here.");
+                ui.add_space(10.0);
+                pick = ui.button("Pick games folder…").clicked();
+                ui.add_space(8.0);
+                readme_line(ui);
+            });
+        } else {
+            match self.library_grid(ui) {
+                Some(LibraryAction::Boot(e)) => self.boot(ctx, &e),
+                Some(LibraryAction::Open(p)) => self.start_load(ctx, p),
+                Some(LibraryAction::Remove(p)) => {
+                    self.library.remove(&p);
+                    let _ = self.library.save();
+                }
+                None => {}
+            }
+        }
+        if pick {
+            self.pick_games_dir();
+        }
+    }
+
+    /// The saved games as tiles, as many across as fit. Returns what was picked.
+    fn library_grid(&mut self, ui: &mut egui::Ui) -> Option<LibraryAction> {
         const TILE: egui::Vec2 = egui::vec2(150.0, 150.0);
         const ICON: f32 = 100.0;
         let mut action = None;
-        // A fixed-size rectangle: three tiles across, two rows, scroll for more.
-        let size = egui::vec2(3.0 * TILE.x + 2.0 * 8.0 + 16.0, 2.0 * TILE.y + 8.0);
-        ui.set_min_size(size);
-        ui.set_max_width(size.x);
-        if self.library.entries.is_empty() {
-            ui.add_space(8.0);
-            ui.label("Your Library is empty.");
-            ui.weak("Press the star next to a game's title to save it here. Games you run in AnyPS5 or RPCS3 are added for you.");
-            ui.add_space(8.0);
-            return None;
-        }
+        let cols = (((ui.available_width() + 8.0) / (TILE.x + 8.0)).floor() as usize).max(1);
         let entries = self.library.entries.clone();
-        egui::ScrollArea::vertical().max_height(size.y).auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("library-grid").spacing([8.0, 8.0]).show(ui, |ui| {
                 for (i, e) in entries.iter().enumerate() {
                     let tex = e.icon.as_ref().and_then(|p| self.library_icon(ui.ctx(), p));
@@ -1121,7 +1221,6 @@ impl App {
                     });
                     if resp.clicked() && !missing {
                         action = Some(LibraryAction::Boot(e.clone()));
-                        ui.close_menu();
                     }
                     resp.context_menu(|ui| {
                         if ui.add_enabled(!missing, egui::Button::new("Open game files")).clicked() {
@@ -1137,7 +1236,7 @@ impl App {
                             ui.close_menu();
                         }
                     });
-                    if i % 3 == 2 {
+                    if i % cols == cols - 1 {
                         ui.end_row();
                     }
                 }
@@ -1351,7 +1450,7 @@ impl App {
         }
         let mut open = true;
         let mut changed = false;
-        let (mut pick_anyps5, mut pick_rpcs3, mut get_rpcs3) = (false, false, false);
+        let (mut pick_anyps5, mut pick_rpcs3, mut get_rpcs3, mut pick_games) = (false, false, false, false);
         let (rpcs3, shadpkg) = (self.paths.rpcs3_exe.clone().flatten(), self.shadpkg_path());
         egui::Window::new("Settings")
             .open(&mut open)
@@ -1362,6 +1461,14 @@ impl App {
                 ui.set_max_width(520.0);
                 changed |= ui.checkbox(&mut self.settings.library_autostart, "Start games when you open them from the Library").changed();
                 changed |= ui.checkbox(&mut self.settings.hide_log, "Hide the log").changed();
+                let mut music = !self.settings.mute_music;
+                if ui.checkbox(&mut music, "Play each game's menu music").changed() {
+                    self.settings.mute_music = !music;
+                    changed = true;
+                    if !music {
+                        self.music = None;
+                    }
+                }
                 ui.add_space(8.0);
                 ui.strong("Program locations");
                 egui::Grid::new("locations").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
@@ -1378,6 +1485,11 @@ impl App {
                             ui.weak("Not set");
                         }
                     };
+                    ui.label("Games folder");
+                    path_label(ui, self.settings.games_dir.clone());
+                    pick_games = ui.add_enabled(!self.busy, egui::Button::new("Change…")).clicked();
+                    ui.end_row();
+
                     ui.label("AnyPS5");
                     path_label(ui, self.settings.anyps5_dir.clone());
                     pick_anyps5 = ui.add_enabled(!self.busy, egui::Button::new("Change…")).clicked();
@@ -1420,6 +1532,9 @@ impl App {
         if pick_rpcs3 {
             self.pick_rpcs3();
         }
+        if pick_games {
+            self.pick_games_dir();
+        }
         if get_rpcs3 {
             self.rpcs3_missing = true;
         }
@@ -1456,7 +1571,7 @@ impl App {
             return;
         }
         // Its own OS window, not one drawn inside the main window.
-        let size = egui::vec2(480.0, 140.0);
+        let size = egui::vec2(480.0, 200.0);
         let mut builder = egui::ViewportBuilder::default()
             .with_title("Welcome to PKG Master")
             .with_inner_size(size)
@@ -1468,9 +1583,20 @@ impl App {
         if let Some(main) = ctx.input(|i| i.viewport().outer_rect) {
             builder = builder.with_position(main.center() - size / 2.0);
         }
+        let games_dir = self.settings.games_dir.clone();
+        let mut pick_games = false;
         let (ok, never) = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("uninstall_tip"), builder, |ctx, _| {
             let (mut ok, mut never) = (ctx.input(|i| i.viewport().close_requested()), false);
             egui::CentralPanel::default().show(ctx, |ui| {
+                ui.strong("Where are your games?");
+                ui.horizontal(|ui| {
+                    pick_games = ui.button("Pick games folder…").clicked();
+                    match &games_dir {
+                        Some(d) => ui.label(RichText::new(d.display().to_string()).monospace()),
+                        None => ui.weak("They show up in your Library."),
+                    };
+                });
+                ui.add_space(10.0);
                 readme_line(ui);
                 ui.add_space(10.0);
                 ui.label("To remove PKG Master, use Uninstall in the menu at the top right.");
@@ -1486,6 +1612,9 @@ impl App {
         if never {
             self.settings.hide_uninstall_tip = true;
             let _ = self.settings.save(&settings_path());
+        }
+        if pick_games {
+            self.pick_games_dir();
         }
         if ok || never {
             self.show_uninstall_tip = false;
@@ -2077,7 +2206,19 @@ fn apply_theme(ctx: &egui::Context) {
     });
 }
 
-/// The start page's drop area: a rounded box around what's drawn inside.
+/// The game's background picture filling the page, dimmed so text stays readable.
+fn paint_background(ui: &egui::Ui, tex: &egui::TextureHandle) {
+    let rect = ui.clip_rect();
+    let size = tex.size_vec2();
+    let scale = (rect.width() / size.x).max(rect.height() / size.y);
+    let img = egui::Rect::from_center_size(rect.center(), size * scale);
+    let painter = ui.painter_at(rect);
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    painter.image(tex.id(), img, uv, Color32::WHITE);
+    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(170));
+}
+
+/// The empty Library's drop area: a rounded box around what's drawn inside.
 fn drop_zone(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(ui.visuals().faint_bg_color)
@@ -2569,20 +2710,13 @@ impl eframe::App for App {
                 if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Open folder…").size(16.0))).clicked() {
                     self.pick_folder(ctx);
                 }
-                let mut picked = None;
-                ui.add_enabled_ui(!self.busy, |ui| {
-                    ui.menu_button(RichText::new(format!("{ICON_LIBRARY} Library")).size(16.0), |ui| {
-                        picked = self.library_menu(ui);
-                    });
-                });
-                match picked {
-                    Some(LibraryAction::Boot(e)) => self.boot(ctx, &e),
-                    Some(LibraryAction::Open(p)) => self.start_load(ctx, p),
-                    Some(LibraryAction::Remove(p)) => {
-                        self.library.remove(&p);
-                        let _ = self.library.save();
-                    }
-                    None => {}
+                if self.path.is_some()
+                    && ui
+                        .add_enabled(!self.busy, egui::Button::new(RichText::new(format!("{ICON_LIBRARY} Library")).size(16.0)))
+                        .on_hover_text("Back to your games")
+                        .clicked()
+                {
+                    self.go_home();
                 }
                 // shadPKG only makes sense for an open PS4 package.
                 let ps4_pkg = self.is_ps4 && self.path.as_deref().is_some_and(is_pkg_path);
@@ -2653,10 +2787,9 @@ impl eframe::App for App {
                     }
                 });
             });
-            match &self.path {
-                Some(p) => ui.label(RichText::new(p.display().to_string()).monospace()),
-                None => ui.weak("No file open"),
-            };
+            if let Some(p) = &self.path {
+                ui.label(RichText::new(p.display().to_string()).monospace());
+            }
             ui.add_space(4.0);
         });
 
@@ -2673,8 +2806,14 @@ impl eframe::App for App {
         self.uninstall_tip_ui(ctx);
         self.update_ui(ctx);
 
+        if self.music.is_some() && self.game_running() {
+            self.music = None;
+        }
         self.actions_bottom = None;
         egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(tex) = self.background.as_ref().filter(|_| self.loaded.is_some()) {
+                paint_background(ui, tex);
+            }
 
             // The passcode row only appears for an encrypted package.
             if self.loaded.as_ref().is_some_and(|l| l.key_problem.is_some()) {
@@ -2734,18 +2873,9 @@ impl eframe::App for App {
             }
 
             let Some(loaded) = &self.loaded else {
-                ui.add_space(40.0);
-                drop_zone(ui, |ui| {
-                    ui.label(RichText::new("Drag a game or file here").size(22.0).strong());
-                    ui.add_space(4.0);
-                    ui.weak("PS5, PS4 and PS3 games, packages and eboot.bin.");
-                    ui.add_space(12.0);
-                    readme_line(ui);
-                    if !self.library.entries.is_empty() {
-                        ui.add_space(12.0);
-                        ui.weak(format!("Your saved games are under {ICON_LIBRARY} Library."));
-                    }
-                });
+                if self.path.is_none() {
+                    self.library_home(ctx, ui);
+                }
                 return;
             };
 

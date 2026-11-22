@@ -8,6 +8,30 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::meta::{GameInfo, Icon};
 
+/// Game folders (holding sce_sys/param.json or param.sfo, or a PS3
+/// PS3_GAME/PARAM.SFO) in `dir`, its subfolders and theirs.
+pub fn find_games(dir: &Path) -> Vec<PathBuf> {
+    let is_game = |p: &Path| {
+        p.join("sce_sys/param.json").is_file() || p.join("sce_sys/param.sfo").is_file() || p.join("PS3_GAME/PARAM.SFO").is_file()
+    };
+    let subdirs = |p: &Path| -> Vec<PathBuf> {
+        fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
+    };
+    if is_game(dir) {
+        return vec![dir.to_path_buf()];
+    }
+    let mut games = Vec::new();
+    for d in subdirs(dir) {
+        if is_game(&d) {
+            games.push(d);
+        } else {
+            games.extend(subdirs(&d).into_iter().filter(|s| is_game(s)));
+        }
+    }
+    games.sort();
+    games
+}
+
 /// Library icons are stored at most this many pixels wide and high.
 const ICON_SIDE: u32 = 128;
 
@@ -114,6 +138,23 @@ impl Library {
         );
     }
 
+    /// Add the games in `dir` that aren't in the Library yet. Returns how many.
+    pub fn add_folder(&mut self, dir: &Path) -> usize {
+        let mut added = 0;
+        for game in find_games(dir) {
+            if self.contains(&game) {
+                continue;
+            }
+            let read = |name: &str| fs::read(game.join(name)).ok();
+            let sfo = read("sce_sys/param.sfo").or_else(|| read("PS3_GAME/PARAM.SFO"));
+            let icon = read("sce_sys/icon0.png").or_else(|| read("PS3_GAME/ICON0.PNG"));
+            let info = GameInfo::from_files(sfo.as_deref(), read("sce_sys/param.json").as_deref(), icon.as_deref());
+            self.add(&game, &info, None);
+            added += 1;
+        }
+        added
+    }
+
     pub fn remove(&mut self, path: &Path) {
         if let Some(i) = self.entries.iter().position(|e| e.path == path) {
             let e = self.entries.remove(i);
@@ -191,5 +232,22 @@ mod tests {
         assert!(!is_ps3_title_id("CUSA10969"));
         assert!(!is_ps3_title_id("PPSA01234"));
         assert!(!is_ps3_title_id("BLUS"));
+    }
+
+    #[test]
+    fn scans_a_games_folder() {
+        let dir = std::env::temp_dir().join(format!("pkgmaster-scan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for g in ["Game A/sce_sys", "more/Game B/sce_sys", "not a game/stuff", "PS3 game/PS3_GAME"] {
+            fs::create_dir_all(dir.join(g)).unwrap();
+        }
+        fs::write(dir.join("Game A/sce_sys/param.json"), br#"{"titleId":"PPSA00001"}"#).unwrap();
+        fs::write(dir.join("more/Game B/sce_sys/param.sfo"), b"").unwrap();
+        fs::write(dir.join("PS3 game/PS3_GAME/PARAM.SFO"), b"").unwrap();
+        assert_eq!(find_games(&dir), vec![dir.join("Game A"), dir.join("PS3 game"), dir.join("more").join("Game B")]);
+        let mut lib = Library::load(&dir.join("library.json"));
+        assert_eq!(lib.add_folder(&dir), 3);
+        assert_eq!(lib.add_folder(&dir), 0);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
