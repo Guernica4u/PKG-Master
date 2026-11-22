@@ -15,6 +15,7 @@ pub mod elf;
 pub mod error;
 pub mod history;
 pub mod library;
+pub mod media;
 pub mod meta;
 pub mod pfs;
 pub mod pkg;

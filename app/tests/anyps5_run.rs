@@ -187,6 +187,8 @@ fn settings_round_trip() {
         anyps5_version: Some("v0.1.3".into()),
         rpcs3: Some(PathBuf::from(r"D:\Emulators\RPCS3\rpcs3.exe")),
         library_autostart: true,
+        games_dir: None,
+        mute_music: false,
         hide_log: true,
         hide_uninstall_tip: true,
         hide_switch_offer: true,

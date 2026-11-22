@@ -22,7 +22,7 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
       - name: Build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libfuse2
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libasound2-dev libfuse2
       - uses: dtolnay/rust-toolchain@stable
       - name: appimagetool
         run: |
