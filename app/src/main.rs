@@ -53,6 +53,7 @@ fn main() -> eframe::Result {
         "PKG Master",
         options,
         Box::new(move |cc| {
+            apply_theme(&cc.egui_ctx);
             let mut app = App::new(settings);
             app.check_for_update(&cc.egui_ctx, false);
             if let Some(path) = initial {
@@ -2034,13 +2035,56 @@ fn elf_folder_for(base: &Path) -> PathBuf {
 }
 
 /// "See the README": what each kind of file does lives there, not in the window.
+/// One link, so a centered layout keeps it centered.
 fn readme_line(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.label("What each file type does is in the");
-        if ui.link("README").clicked() {
-            open_url(README_URL);
-        }
+    if ui.link("What each file type does is in the README").clicked() {
+        open_url(README_URL);
+    }
+}
+
+/// Dark panels, rounder widgets and a blue accent instead of stock egui grey.
+fn apply_theme(ctx: &egui::Context) {
+    let rgb = Color32::from_rgb;
+    let accent = rgb(0x1F, 0x6F, 0xEB);
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = rgb(0x14, 0x17, 0x1C);
+    v.window_fill = rgb(0x1B, 0x1F, 0x26);
+    v.extreme_bg_color = rgb(0x0E, 0x10, 0x14);
+    v.faint_bg_color = rgb(0x1E, 0x23, 0x2B);
+    v.selection.bg_fill = accent;
+    v.hyperlink_color = rgb(0x6C, 0xB4, 0xFF);
+    v.window_corner_radius = 10.into();
+    v.menu_corner_radius = 8.into();
+    let w = &mut v.widgets;
+    for (state, fill) in [
+        (&mut w.inactive, rgb(0x26, 0x2C, 0x36)),
+        (&mut w.hovered, rgb(0x31, 0x3A, 0x48)),
+        (&mut w.active, accent),
+        (&mut w.open, rgb(0x31, 0x3A, 0x48)),
+    ] {
+        state.weak_bg_fill = fill;
+        state.bg_fill = fill;
+        state.bg_stroke = egui::Stroke::NONE;
+        state.corner_radius = 6.into();
+    }
+    w.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent);
+    w.noninteractive.corner_radius = 6.into();
+    w.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, rgb(0x2A, 0x30, 0x3A));
+    ctx.set_visuals(v);
+    ctx.style_mut(|s| {
+        s.spacing.button_padding = egui::vec2(10.0, 5.0);
+        s.spacing.item_spacing = egui::vec2(8.0, 6.0);
     });
+}
+
+/// The start page's drop area: a rounded box around what's drawn inside.
+fn drop_zone(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(egui::Stroke::new(1.5_f32, ui.visuals().widgets.noninteractive.bg_stroke.color))
+        .corner_radius(12)
+        .inner_margin(egui::Margin::symmetric(32, 28))
+        .show(ui, |ui| ui.vertical_centered(add));
 }
 
 const README_URL: &str = "https://github.com/Guernica4u/PKG-Master#readme";
@@ -2691,9 +2735,11 @@ impl eframe::App for App {
 
             let Some(loaded) = &self.loaded else {
                 ui.add_space(40.0);
-                ui.vertical_centered(|ui| {
-                    ui.heading("Drag a game or file here");
-                    ui.add_space(8.0);
+                drop_zone(ui, |ui| {
+                    ui.label(RichText::new("Drag a game or file here").size(22.0).strong());
+                    ui.add_space(4.0);
+                    ui.weak("PS5, PS4 and PS3 games, packages and eboot.bin.");
+                    ui.add_space(12.0);
                     readme_line(ui);
                     if !self.library.entries.is_empty() {
                         ui.add_space(12.0);
