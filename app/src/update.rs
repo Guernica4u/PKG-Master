@@ -47,7 +47,7 @@ pub fn program_path() -> std::io::Result<PathBuf> {
     std::env::current_exe()
 }
 
-fn running_appimage() -> bool {
+pub fn running_appimage() -> bool {
     !cfg!(windows) && std::env::var_os("APPIMAGE").is_some()
 }
 
@@ -189,7 +189,7 @@ pub fn install(release: &Release, progress: Progress, cancel: &AtomicBool) -> Re
 }
 
 /// Unpack a `.tar.gz` with the system's `tar`, which keeps the execute bits.
-fn untar(archive: &Path, dest: &Path) -> Result<()> {
+pub fn untar(archive: &Path, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest)?;
     let status = std::process::Command::new("tar").arg("-xzf").arg(archive).arg("-C").arg(dest).status()?;
     if !status.success() {
@@ -242,7 +242,7 @@ fn not_writable(dir: &Path, e: std::io::Error) -> Error {
 }
 
 /// The first file called `name` (any case) in `dir` or one folder below it.
-fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+pub fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
     let entries: Vec<PathBuf> = fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     let matches = |p: &Path| p.is_file() && p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name));
     entries

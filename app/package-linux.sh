@@ -31,21 +31,13 @@ PKG Master v$version for Linux
 
 Run ./pkgmaster-gui. Nothing to install.
 
-Drop a file on the window:
-  eboot.bin            -> Convert to ELF
-  PS5 game folder      -> Run in AnyPS5, then Launch
-  PS4 .pkg             -> Run shadPKG (PS4) to decrypt and extract it
-  fake / debug .pkg    -> passcode (often 32 zeros), then convert or extract
-  PS3 folder or .iso   -> Run in RPCS3
+Drop a game or file on the window. The README says what each kind does.
 
-Emulators aren't included. The app downloads the official release when
-you ask. shadPKG: get it from https://github.com/seregonwar/ShadPKG/releases
-and put it in the shadpkg folder.
+Only using it for PS5 games? Try PS5toPC instead:
+https://github.com/Guernica4u/PS5toPC
 
-Command line: ./pkgmaster-cli convert eboot.bin eboot.elf
-
-Uninstall with Menu > Uninstall PKG Master. Deleting the folder by hand
-leaves settings (~/.config/pkg-master) and downloads behind.
+To remove it, use Menu > Uninstall. Deleting the folder leaves your
+settings and downloads behind.
 
 Full guide: https://github.com/Guernica4u/PKG-Master
 EOF
