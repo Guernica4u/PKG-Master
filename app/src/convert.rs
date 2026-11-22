@@ -209,6 +209,15 @@ fn load_ps3_folder(root: &Path, game: &Path) -> Result<Loaded> {
     })
 }
 
+/// The background picture and menu music in sce_sys/, when the game has them.
+pub fn home_media(input: &Input) -> (Option<image::RgbaImage>, Option<crate::media::Music>) {
+    let quiet = |_: u64, _: u64, _: &str| {};
+    let read = |p: &str| input.read_file(p, &quiet).ok().flatten().filter(|d| d.len() as u64 <= crate::meta::MAX_META_SIZE);
+    let background = ["sce_sys/pic0.png", "sce_sys/pic1.png"].iter().find_map(|p| read(p)).and_then(|d| crate::media::decode_background(&d));
+    let music = read("sce_sys/snd0.at9").and_then(|d| crate::media::decode_at9(&d));
+    (background, music)
+}
+
 pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
     if path.is_dir() {
         if let Some(game) = ps3_game_dir(path) {
