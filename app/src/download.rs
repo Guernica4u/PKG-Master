@@ -42,7 +42,7 @@ impl Release {
     }
 }
 
-const USER_AGENT: &str = concat!("PKG-Master/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("ROM-Master/", env!("CARGO_PKG_VERSION"));
 
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new().user_agent(USER_AGENT).timeout_connect(Duration::from_secs(15)).build()

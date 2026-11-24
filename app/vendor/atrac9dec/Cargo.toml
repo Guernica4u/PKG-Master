@@ -1,0 +1,6 @@
+[package]
+name = "atrac9dec"
+version = "0.9.1"
+edition = "2024"
+license = "MIT"
+description = "Pure Rust ATRAC9 decoder (vendored from atrac9dec 0.9.1 with band-extension and stereo fixes)"

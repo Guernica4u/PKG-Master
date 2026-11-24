@@ -223,6 +223,9 @@ pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
         if let Some(game) = ps3_game_dir(path) {
             return load_ps3_folder(path, &game);
         }
+        if let Some(console) = crate::console::detect(path) {
+            return Ok(rom_loaded(path, console));
+        }
         return load_folder(path);
     }
     let mut magic = [0u8; 4];
@@ -270,6 +273,9 @@ pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
 
     let head = magic.to_vec();
     if !(is_elf(&head) || is_self(&head)) {
+        if let Some(console) = crate::console::detect(path) {
+            return Ok(rom_loaded(path, console));
+        }
         return Err(Error::Conversion(format!(
             "{} is neither a package nor an ELF/SELF file",
             path.display()
@@ -289,6 +295,21 @@ pub fn load(path: &Path, passcode: Option<&str>) -> Result<Loaded> {
         info: GameInfo::default(),
         ps3_eboot: None,
     })
+}
+
+/// A game for another console's emulator: nothing to convert, just its name.
+fn rom_loaded(path: &Path, console: crate::console::Console) -> Loaded {
+    let size = if path.is_dir() { walk_folder(path).map(|f| f.iter().map(|r| r.size).sum()).unwrap_or(0) } else { fs::metadata(path).map(|m| m.len()).unwrap_or(0) };
+    let title = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+    Loaded {
+        rows: vec![("Console".into(), console.name().into()), ("Size".into(), fmt_size(size))],
+        input: None,
+        files: Vec::new(),
+        default_elf: None,
+        key_problem: None,
+        info: GameInfo { title, ..GameInfo::default() },
+        ps3_eboot: None,
+    }
 }
 
 /// Open a decrypted game folder. It must have an eboot.bin (or, once the
@@ -743,7 +764,7 @@ pub(crate) fn copy_folder(root: &Path, dest: &Path, progress: Progress) -> Resul
 
 fn how_to_run(r: &ExportReport) -> String {
     let mut s = String::new();
-    s.push_str("Exported by PKG Master for AnyPS5 (https://github.com/boykopovar/AnyPS5).\n");
+    s.push_str("Exported by ROM Master for AnyPS5 (https://github.com/boykopovar/AnyPS5).\n");
     s.push_str("AnyPS5 is not included here; get it from its own project page.\n\n");
     s.push_str("What is in this folder\n");
     s.push_str("  source/eboot.elf      the main executable, converted from eboot.bin\n");
