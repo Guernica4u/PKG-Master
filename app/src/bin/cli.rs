@@ -1,13 +1,13 @@
-//! Command-line PKG Master, for scripting. Drop an eboot.bin on the exe to
+//! Command-line ROM Master, for scripting. Drop an eboot.bin on the exe to
 //! convert it to eboot.elf next to it.
 //!
-//!   pkgmaster-cli FILE
-//!   pkgmaster-cli info    FILE [--passcode P]
-//!   pkgmaster-cli list    FILE [--passcode P]
-//!   pkgmaster-cli convert FILE OUT [--passcode P] [--path P]
-//!   pkgmaster-cli extract FILE DIR [--passcode P]
-//!   pkgmaster-cli export  FILE|FOLDER DIR [--passcode P]
-//!   pkgmaster-cli anyps5  FOLDER DIR [--anyps5 ANYPS5_DIR] [--relinker FILE]
+//!   rommaster-cli FILE
+//!   rommaster-cli info    FILE [--passcode P]
+//!   rommaster-cli list    FILE [--passcode P]
+//!   rommaster-cli convert FILE OUT [--passcode P] [--path P]
+//!   rommaster-cli extract FILE DIR [--passcode P]
+//!   rommaster-cli export  FILE|FOLDER DIR [--passcode P]
+//!   rommaster-cli anyps5  FOLDER DIR [--anyps5 ANYPS5_DIR] [--relinker FILE]
 //!
 //! `export` lays a package or a decrypted game folder out for AnyPS5:
 //! source/eboot.elf, source/sce_module/*, app0/ and HOW-TO-RUN.txt. `anyps5`
@@ -25,8 +25,8 @@ use pkgmaster::convert::{convert_to_elf, export_anyps5, extract_all, load, Input
 use pkgmaster::Error;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: pkgmaster-cli info|list|convert|extract|export|anyps5 FILE [OUT] [--passcode P] [--path P] [--anyps5 DIR] [--relinker FILE]");
-    eprintln!("   or: drop an eboot.bin on pkgmaster-cli to convert it to eboot.elf next to it");
+    eprintln!("usage: rommaster-cli info|list|convert|extract|export|anyps5 FILE [OUT] [--passcode P] [--path P] [--anyps5 DIR] [--relinker FILE]");
+    eprintln!("   or: drop an eboot.bin on rommaster-cli to convert it to eboot.elf next to it");
     ExitCode::from(2)
 }
 

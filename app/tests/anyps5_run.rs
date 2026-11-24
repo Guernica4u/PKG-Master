@@ -186,6 +186,7 @@ fn settings_round_trip() {
         skip_version: Some("v9.9.9".into()),
         anyps5_version: Some("v0.1.3".into()),
         rpcs3: Some(PathBuf::from(r"D:\Emulators\RPCS3\rpcs3.exe")),
+        emus: [("pcsx2".to_string(), PathBuf::from(r"D:\Emu\pcsx2-qt.exe"))].into(),
         library_autostart: true,
         games_dir: None,
         mute_music: false,

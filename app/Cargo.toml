@@ -10,11 +10,11 @@ name = "pkgmaster"
 path = "src/lib.rs"
 
 [[bin]]
-name = "pkgmaster-gui"
+name = "rommaster-gui"
 path = "src/main.rs"
 
 [[bin]]
-name = "pkgmaster-cli"
+name = "rommaster-cli"
 path = "src/bin/cli.rs"
 
 [dependencies]
@@ -33,7 +33,7 @@ ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["util"] }
 rodio = { version = "0.21", default-features = false, features = ["playback"] }
-atrac9dec = "0.9.1"
+atrac9dec = { path = "vendor/atrac9dec" }
 
 [profile.release]
 opt-level = 3

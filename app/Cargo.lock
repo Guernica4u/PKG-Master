@@ -338,8 +338,6 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "atrac9dec"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35b2862764c73193c0b0aae64e8510cc1177c79a4b5d24726470de479c59fc11"
 
 [[package]]
 name = "autocfg"

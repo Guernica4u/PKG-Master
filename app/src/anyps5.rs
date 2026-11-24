@@ -131,7 +131,9 @@ pub struct Settings {
     pub anyps5_version: Option<String>,
     /// The user's rpcs3.exe, for Run in RPCS3.
     pub rpcs3: Option<PathBuf>,
-    /// A PKG Master release the user chose to skip, such as `v0.1.4`.
+    /// The other emulators the user set up, by `emulators::Emu::id`.
+    pub emus: std::collections::BTreeMap<String, PathBuf>,
+    /// A ROM Master release the user chose to skip, such as `v0.1.4`.
     pub skip_version: Option<String>,
     /// Clicking a Library game also starts it (AnyPS5 or RPCS3).
     pub library_autostart: bool,
@@ -167,6 +169,9 @@ impl Settings {
                 "relinker" => s.relinker = Some(PathBuf::from(v)),
                 "anyps5_version" => s.anyps5_version = Some(v.to_string()),
                 "rpcs3" => s.rpcs3 = Some(PathBuf::from(v)),
+                k if k.starts_with("emu.") => {
+                    s.emus.insert(k["emu.".len()..].to_string(), PathBuf::from(v));
+                }
                 "library_autostart" => s.library_autostart = v == "1",
                 "games_dir" => s.games_dir = Some(PathBuf::from(v)),
                 "mute_music" => s.mute_music = v == "1",
@@ -186,7 +191,7 @@ impl Settings {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let mut lines = vec!["# PKG Master settings".to_string()];
+        let mut lines = vec!["# ROM Master settings".to_string()];
         let mut put = |key: &str, value: Option<String>| {
             if let Some(v) = value {
                 lines.push(format!("{key}={v}"));
@@ -196,6 +201,9 @@ impl Settings {
         put("relinker", self.relinker.as_ref().map(|r| r.display().to_string()));
         put("anyps5_version", self.anyps5_version.clone());
         put("rpcs3", self.rpcs3.as_ref().map(|r| r.display().to_string()));
+        for (id, exe) in &self.emus {
+            put(&format!("emu.{id}"), Some(exe.display().to_string()));
+        }
         put("skip_version", self.skip_version.clone());
         put("library_autostart", self.library_autostart.then(|| "1".to_string()));
         put("games_dir", self.games_dir.as_ref().map(|d| d.display().to_string()));
@@ -461,7 +469,7 @@ impl Preflight {
         if !self.has_param_json {
             w.push(
                 "sce_sys/param.json is missing (PS4 dumps only have param.sfo). AnyPS5 reads the title ID \
-                 and name from it, so metadata calls may fail. PKG Master will not make one up."
+                 and name from it, so metadata calls may fail. ROM Master will not make one up."
                     .into(),
             );
         }

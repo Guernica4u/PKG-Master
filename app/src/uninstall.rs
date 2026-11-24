@@ -1,4 +1,4 @@
-//! Uninstall: everything PKG Master put on the computer, so it can be shown
+//! Uninstall: everything ROM Master put on the computer, so it can be shown
 //! to the user, confirmed and removed.
 //!
 //! Always removed: the settings, History (with its backups), the Library,
@@ -55,11 +55,11 @@ pub fn plan_in(settings_file: &Path, program: Option<&Path>, local_dir: Option<&
     }
 
     if let Some(exe) = program {
-        add(exe.to_path_buf(), "PKG Master", false);
+        add(exe.to_path_buf(), "ROM Master", false);
         add(old(exe), "Update leftover", false);
         if let Some(dir) = exe.parent() {
             for name in companions() {
-                add(dir.join(name), "PKG Master", false);
+                add(dir.join(name), "ROM Master", false);
                 add(old(&dir.join(name)), "Update leftover", false);
             }
             // .pkgmaster-update and .pkgmaster-write-test-<pid> leftovers.
@@ -73,6 +73,9 @@ pub fn plan_in(settings_file: &Path, program: Option<&Path>, local_dir: Option<&
             add(shadpkg, if empty { "Empty shadpkg folder" } else { "shadpkg folder (your copy of shadPKG)" }, !empty);
             add(dir.join("AnyPS5"), "AnyPS5 download, with your games' run folders", true);
             add(dir.join("rpcs3"), "RPCS3 download, with its settings and saves", true);
+            for e in &crate::emulators::ALL {
+                add(dir.join(e.id), &format!("{} download, with its settings and saves", e.name), true);
+            }
         }
     }
 
@@ -84,6 +87,9 @@ pub fn plan_in(settings_file: &Path, program: Option<&Path>, local_dir: Option<&
     if let Some(local) = local_dir {
         add(local.join("AnyPS5"), "AnyPS5 download, with your games' run folders", true);
         add(local.join("rpcs3"), "RPCS3 download, with its settings and saves", true);
+        for e in &crate::emulators::ALL {
+            add(local.join(e.id), &format!("{} download, with its settings and saves", e.name), true);
+        }
         // Anything else in the app's own local folder is ours too.
         for entry in fs::read_dir(local).into_iter().flatten().flatten() {
             add(entry.path(), "Downloads left behind", false);
@@ -93,12 +99,13 @@ pub fn plan_in(settings_file: &Path, program: Option<&Path>, local_dir: Option<&
 }
 
 #[cfg(windows)]
-fn companions() -> [&'static str; 2] {
-    ["pkgmaster-cli.exe", "README.txt"]
+fn companions() -> [&'static str; 3] {
+    // pkgmaster-cli: installs updated from PKG Master keep their old CLI.
+    ["rommaster-cli.exe", "pkgmaster-cli.exe", "README.txt"]
 }
 #[cfg(not(windows))]
-fn companions() -> [&'static str; 2] {
-    ["pkgmaster-cli", "README.txt"]
+fn companions() -> [&'static str; 3] {
+    ["rommaster-cli", "pkgmaster-cli", "README.txt"]
 }
 
 fn old(p: &Path) -> PathBuf {
@@ -226,8 +233,8 @@ mod tests {
             (data.join("history.tsv"), "x"),
             (data.join("backups/1/old.elf"), "12345"),
             (data.join("library.json"), "[]"),
-            (app.join("pkgmaster-gui.exe"), "gui"),
-            (app.join("pkgmaster-gui.exe.old"), "old"),
+            (app.join("rommaster-gui.exe"), "gui"),
+            (app.join("rommaster-gui.exe.old"), "old"),
             (app.join("README.txt"), "r"),
             (app.join(".pkgmaster-write-test-123"), ""),
             (app.join("AnyPS5/game-run/app.exe"), "game"),
@@ -237,13 +244,13 @@ mod tests {
         ] {
             fs::write(f, body).unwrap();
         }
-        let items = plan_in(&data.join("settings.ini"), Some(&app.join("pkgmaster-gui.exe")), Some(&local), None);
+        let items = plan_in(&data.join("settings.ini"), Some(&app.join("rommaster-gui.exe")), Some(&local), None);
         let find = |p: &Path| items.iter().find(|i| i.path == p).cloned();
 
         // App data and leftovers always go; downloads are optional.
         assert!(!find(&data.join("backups")).unwrap().optional);
         assert_eq!(find(&data.join("backups")).unwrap().size, 5);
-        assert!(!find(&app.join("pkgmaster-gui.exe.old")).unwrap().optional);
+        assert!(!find(&app.join("rommaster-gui.exe.old")).unwrap().optional);
         assert!(find(&app.join(".pkgmaster-write-test-123")).is_some());
         assert!(!find(&local.join("half.zip.part")).unwrap().optional);
         assert!(find(&app.join("AnyPS5")).unwrap().optional);
@@ -268,14 +275,14 @@ mod tests {
 
     #[test]
     fn finds_the_target_in_a_shortcut() {
-        let exe = Path::new(r"C:\Games\PKG Master\pkgmaster-gui.exe");
-        let wide: Vec<u8> = r"c:\games\pkg master\PKGMASTER-GUI.EXE".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let exe = Path::new(r"C:\Games\ROM Master\rommaster-gui.exe");
+        let wide: Vec<u8> = r"c:\games\rom master\ROMMASTER-GUI.EXE".encode_utf16().flat_map(u16::to_le_bytes).collect();
         for pad in [0usize, 1] {
             let mut lnk = vec![0x4c; pad + 3];
             lnk.extend(&wide);
             assert!(lnk_points_to(&lnk, exe), "utf-16 at offset {pad}");
         }
-        assert!(lnk_points_to(br"..C:\Games\PKG Master\pkgmaster-gui.exe\0", exe));
-        assert!(!lnk_points_to(br"..C:\Other\pkgmaster-gui.exe\0", exe));
+        assert!(lnk_points_to(br"..C:\Games\ROM Master\rommaster-gui.exe\0", exe));
+        assert!(!lnk_points_to(br"..C:\Other\rommaster-gui.exe\0", exe));
     }
 }

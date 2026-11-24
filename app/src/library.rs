@@ -12,20 +12,29 @@ use crate::meta::{GameInfo, Icon};
 /// PS3_GAME/PARAM.SFO) in `dir`, its subfolders and theirs.
 pub fn find_games(dir: &Path) -> Vec<PathBuf> {
     let is_game = |p: &Path| {
-        p.join("sce_sys/param.json").is_file() || p.join("sce_sys/param.sfo").is_file() || p.join("PS3_GAME/PARAM.SFO").is_file()
+        p.join("sce_sys/param.json").is_file()
+            || p.join("sce_sys/param.sfo").is_file()
+            || p.join("PS3_GAME/PARAM.SFO").is_file()
+            || crate::console::detect(p).is_some()
+    };
+    // Disc images and other consoles' game files count by extension (reading each would be slow).
+    let is_rom = |p: &Path| {
+        p.is_file()
+            && p.extension().is_some_and(|e| crate::console::ROM_EXTS.contains(&e.to_string_lossy().to_lowercase().as_str()))
     };
     let subdirs = |p: &Path| -> Vec<PathBuf> {
-        fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
+        let entries: Vec<PathBuf> = fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).collect();
+        entries.into_iter().filter(|p| p.is_dir() || is_rom(p)).collect()
     };
     if is_game(dir) {
         return vec![dir.to_path_buf()];
     }
     let mut games = Vec::new();
     for d in subdirs(dir) {
-        if is_game(&d) {
+        if is_rom(&d) || is_game(&d) {
             games.push(d);
-        } else {
-            games.extend(subdirs(&d).into_iter().filter(|s| is_game(s)));
+        } else if d.is_dir() {
+            games.extend(subdirs(&d).into_iter().filter(|s| is_rom(s) || is_game(s)));
         }
     }
     games.sort();
@@ -148,7 +157,10 @@ impl Library {
             let read = |name: &str| fs::read(game.join(name)).ok();
             let sfo = read("sce_sys/param.sfo").or_else(|| read("PS3_GAME/PARAM.SFO"));
             let icon = read("sce_sys/icon0.png").or_else(|| read("PS3_GAME/ICON0.PNG"));
-            let info = GameInfo::from_files(sfo.as_deref(), read("sce_sys/param.json").as_deref(), icon.as_deref());
+            let mut info = GameInfo::from_files(sfo.as_deref(), read("sce_sys/param.json").as_deref(), icon.as_deref());
+            if game.is_file() {
+                info.title = game.file_stem().map(|s| s.to_string_lossy().into_owned());
+            }
             self.add(&game, &info, None);
             added += 1;
         }

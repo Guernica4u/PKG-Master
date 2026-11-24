@@ -49,8 +49,7 @@ pub fn decode_at9(data: &[u8]) -> Option<Music> {
     let mut frame = vec![0i16; info.channels * info.frame_samples * info.frames_in_superframe];
     let mut samples = Vec::with_capacity(body.len() / block_align * frame.len());
     for sf in body.chunks_exact(block_align) {
-        // shortcut: atrac9dec mis-reads band-extension (low bitrate) streams; a bad
-        // block plays as loud noise, so such music is skipped. Drop this once it decodes them.
+        // A block that doesn't decode would play as loud noise, so skip the track instead.
         decoder.decode(sf, &mut frame).ok()?;
         samples.extend(frame.iter().map(|&s| s as f32 / 32768.0));
     }
