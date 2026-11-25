@@ -764,7 +764,7 @@ pub(crate) fn copy_folder(root: &Path, dest: &Path, progress: Progress) -> Resul
 
 fn how_to_run(r: &ExportReport) -> String {
     let mut s = String::new();
-    s.push_str("Exported by ROM Master for AnyPS5 (https://github.com/boykopovar/AnyPS5).\n");
+    s.push_str("Exported by PKG Master for AnyPS5 (https://github.com/boykopovar/AnyPS5).\n");
     s.push_str("AnyPS5 is not included here; get it from its own project page.\n\n");
     s.push_str("What is in this folder\n");
     s.push_str("  source/eboot.elf      the main executable, converted from eboot.bin\n");

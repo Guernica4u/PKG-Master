@@ -1,4 +1,4 @@
-//! The emulators ROM Master can download and start, besides AnyPS5 and RPCS3
+//! The emulators PKG Master can download and start, besides AnyPS5 and RPCS3
 //! (which have their own setup): one table, one installer. None of them ship
 //! with the app; "Download for me" fetches each project's official build.
 

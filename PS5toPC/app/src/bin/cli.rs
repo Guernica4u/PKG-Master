@@ -1,0 +1,189 @@
+//! Command-line PS5toPC, for scripting. Drop an eboot.bin on the exe to
+//! convert it to eboot.elf next to it.
+//!
+//!   ps5topc-cli FILE
+//!   ps5topc-cli info    FILE [--passcode P]
+//!   ps5topc-cli list    FILE [--passcode P]
+//!   ps5topc-cli convert FILE OUT [--passcode P] [--path P]
+//!   ps5topc-cli extract FILE DIR [--passcode P]
+//!   ps5topc-cli export  FILE|FOLDER DIR [--passcode P]
+//!   ps5topc-cli anyps5  FOLDER DIR [--anyps5 ANYPS5_DIR] [--relinker FILE]
+//!
+//! `export` lays a package or a decrypted game folder out for AnyPS5:
+//! source/eboot.elf, source/sce_module/*, app0/ and HOW-TO-RUN.txt. `anyps5`
+//! also runs the user's own AnyPS5 relinker (the folder given, or the one saved
+//! by the window) and lays out app.exe, libs/ and app0/ in DIR.
+//!
+//! Exit codes: 0 ok, 2 bad file/usage, 3 key required or
+//! wrong, 4 recognised but unimplemented.
+
+use std::path::Path;
+use std::process::ExitCode;
+
+use ps5topc::anyps5::{preflight, run_relinker, settings_path, Settings};
+use ps5topc::convert::{convert_to_elf, export_anyps5, extract_all, load, Input, MODULE_DIR};
+use ps5topc::Error;
+
+fn usage() -> ExitCode {
+    eprintln!("usage: ps5topc-cli info|list|convert|extract|export|anyps5 FILE [OUT] [--passcode P] [--path P] [--anyps5 DIR] [--relinker FILE]");
+    eprintln!("   or: drop an eboot.bin on ps5topc-cli to convert it to eboot.elf next to it");
+    ExitCode::from(2)
+}
+
+fn main() -> ExitCode {
+    let code = run();
+    // Double-clicked or dropped on: keep the window open so the output can be read.
+    if own_console() {
+        eprintln!("
+Press Enter to close.");
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
+    code
+}
+
+/// True when this program is the only one on its console, i.e. Explorer
+/// opened a fresh window for it instead of it running in a terminal.
+#[cfg(windows)]
+fn own_console() -> bool {
+    extern "system" {
+        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+    }
+    let mut ids = [0u32; 2];
+    // SAFETY: the buffer holds count u32s.
+    unsafe { GetConsoleProcessList(ids.as_mut_ptr(), 2) == 1 }
+}
+
+#[cfg(not(windows))]
+fn own_console() -> bool {
+    false
+}
+
+fn run() -> ExitCode {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let mut take_opt = |name: &str| -> Option<String> {
+        let i = args.iter().position(|a| a == name)?;
+        let value = args.get(i + 1).cloned();
+        args.drain(i..(i + 2).min(args.len()));
+        value
+    };
+    let passcode = take_opt("--passcode").or_else(|| std::env::var("PS5TOPC_PASSCODE").ok());
+    let inner = take_opt("--path");
+    let anyps5_dir = take_opt("--anyps5");
+    let relinker = take_opt("--relinker");
+    // A lone file (dropped on the exe): convert it to <name>.elf beside it.
+    if let [file] = args.as_slice() {
+        let p = Path::new(file);
+        // An .elf would be overwritten by its own output, so it gets the usage text.
+        if p.is_file() && !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("elf")) {
+            let out = p.with_extension("elf").to_string_lossy().into_owned();
+            args = vec!["convert".into(), file.clone(), out];
+        }
+    }
+    if args.len() < 2 {
+        return usage();
+    }
+    let quiet = |_: u64, _: u64, _: &str| {};
+    let result = (|| -> Result<(), Error> {
+        let loaded = load(Path::new(&args[1]), passcode.as_deref())?;
+        if let Some(e) = loaded.key_problem {
+            return Err(e);
+        }
+        let input = loaded.input.expect("loaded without a key problem");
+        match args[0].as_str() {
+            "info" => {
+                let info = &loaded.info;
+                for (k, v) in [("Title", &info.title), ("Title ID", &info.title_id), ("Version", &info.version)] {
+                    if let Some(v) = v {
+                        println!("{k:<14}  {v}");
+                    }
+                }
+                if let Some(icon) = &info.icon {
+                    println!("{:<14}  {}x{} PNG", "Icon", icon.width, icon.height);
+                }
+                for (k, v) in &loaded.rows {
+                    println!("{k:<14}  {v}");
+                }
+                if let Some(d) = &loaded.default_elf {
+                    println!("{:<14}  {d}", "Executable");
+                }
+            }
+            "list" => {
+                for f in loaded.files.iter().filter(|f| !f.is_dir) {
+                    println!("{:>12}  {}", f.size, f.path);
+                }
+            }
+            "convert" => {
+                let out = args.get(2).ok_or_else(|| Error::Conversion("convert needs an output path".into()))?;
+                let r = convert_to_elf(&input, inner.as_deref(), Path::new(out), &quiet)?;
+                println!("source    {}", r.source);
+                println!("output    {} ({} bytes)", r.output.display(), r.conversion.data.len());
+                println!(
+                    "elf       {} / {} / {}",
+                    r.conversion.info.type_name(),
+                    r.conversion.info.machine_name(),
+                    r.conversion.info.osabi_name()
+                );
+                println!("entry     0x{:X}", r.conversion.info.e_entry);
+                for w in &r.conversion.warnings {
+                    println!("warning: {w}");
+                }
+            }
+            "extract" => {
+                let out = args.get(2).ok_or_else(|| Error::Conversion("extract needs a folder".into()))?;
+                let Input::Package(pfs) = &input else {
+                    return Err(Error::Conversion("only packages can be extracted".into()));
+                };
+                let n = extract_all(pfs, Path::new(out), &quiet)?;
+                println!("{n} file(s) written to {out}");
+            }
+            "export" => {
+                let out = args.get(2).ok_or_else(|| Error::Conversion("export needs a folder".into()))?;
+                let r = export_anyps5(&input, Path::new(out), &quiet)?;
+                println!("eboot     source/eboot.elf ({} / {})", r.eboot.type_name(), r.eboot.machine_name());
+                for m in &r.modules {
+                    println!("module    source/{MODULE_DIR}/{m}");
+                }
+                for (m, why) in &r.skipped {
+                    println!("skipped   {MODULE_DIR}/{m}: {why}");
+                }
+                println!("app0      {} file(s)", r.app0_files);
+                for w in &r.warnings {
+                    println!("warning: {w}");
+                }
+                println!("exported to {out}; see HOW-TO-RUN.txt");
+            }
+            "anyps5" => {
+                let out = args.get(2).ok_or_else(|| Error::Conversion("anyps5 needs a folder".into()))?;
+                let Input::Folder(root) = &input else {
+                    return Err(Error::Conversion("anyps5 needs a decrypted game folder".into()));
+                };
+                let mut settings = Settings::load(&settings_path());
+                if let Some(d) = anyps5_dir {
+                    settings = Settings { anyps5_dir: Some(d.into()), relinker: None, ..Default::default() };
+                }
+                if let Some(r) = relinker {
+                    settings.relinker = Some(r.into());
+                }
+                if settings.anyps5_dir.is_none() {
+                    return Err(Error::Conversion("pass --anyps5 with your AnyPS5 folder".into()));
+                }
+                let release = settings.release()?;
+                for w in preflight(root)?.warnings() {
+                    println!("warning: {w}");
+                }
+                let log = |line: &str| println!("{line}");
+                let r = run_relinker(root, &release, Path::new(out), &quiet, &log)?;
+                println!("ready in {}; start app.exe from that folder", r.out_dir.display());
+            }
+            _ => return Err(Error::Conversion(format!("unknown command {:?}", args[0]))),
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(e.exit_code() as u8)
+        }
+    }
+}

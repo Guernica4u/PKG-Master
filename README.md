@@ -1,17 +1,17 @@
-# ROM Master
+# PKG Master
 
 A toolbox for game files you dumped yourself. One app for PS1 to PS5, PSP,
 PS Vita, GameCube, Wii and Xbox 360: open packages, turn `eboot.bin` into a
 normal ELF, and play games in the right emulator.
 
-> **Only here for PS5 or PS4 games?** Use [PS5toPC](https://github.com/Guernica4u/PS5toPC)
-> instead. It's the PS5/PS4 part of this app, plus KytyPS5. ROM Master offers
-> to swap you over when it starts.
+> **Only here for PS5 or PS4 games?** Grab the `PS5toPC` download from the
+> same release instead. It's the PS5/PS4 part of this app, plus KytyPS5. PKG
+> Master offers to swap you over when it starts. Its source is in [PS5toPC/](PS5toPC).
 
-**[Download](https://github.com/Guernica4u/ROM-Master/releases/latest)** and
+**[Download](https://github.com/Guernica4u/PKG-Master/releases/latest)** and
 run it. Nothing to install.
 
-- **Windows:** unzip, run `rommaster-gui.exe`. It isn't code-signed, so
+- **Windows:** unzip, run `pkgmaster-gui.exe`. It isn't code-signed, so
   Windows may warn you: click **More info → Run anyway**.
 - **Linux:** `chmod +x` the AppImage and run it, or unpack the tar.gz.
 - **Just the converter:** `python eboot2elf.py eboot.bin`. One file, no installs.
@@ -35,7 +35,7 @@ Drop it on the window, or pick your games folder and use the Library:
 | GameCube / Wii `.iso` `.rvz` `.wbfs` | Run in Dolphin |
 | Xbox 360 `.iso` / `.zar` / game folder | Run in Xenia Canary |
 
-None of the emulators come with the app. The first time you need one, ROM
+None of the emulators come with the app. The first time you need one, PKG
 Master downloads its official release for you (or you point it at your own).
 For [shadPKG](https://github.com/seregonwar/ShadPKG/releases), grab
 `shadPKG.exe` yourself and drop it in the `shadpkg` folder. RPCS3 also needs
@@ -50,13 +50,13 @@ the free [PS3 system software](https://www.playstation.com/en-us/support/hardwar
   settings and downloads get left behind.
 - **Windows says it's a virus?** It's a false alarm because the app is new and
   unsigned. In Windows Security, open **Protection history** and pick **Allow**.
-- **Command line:** `rommaster-cli convert eboot.bin eboot.elf`, or drop a file on `rommaster-cli.exe`.
-- **Used to be PKG Master.** Old installs update to ROM Master on their own.
+- **Command line:** `pkgmaster-cli convert eboot.bin eboot.elf`, or drop a file on `pkgmaster-cli.exe`.
+- **Was called ROM Master for a while.** Those installs update to PKG Master on their own.
 
 ## Build
 
 ```bash
-cd app
+cd app            # or PS5toPC/app
 cargo build --release
 cargo test
 ```

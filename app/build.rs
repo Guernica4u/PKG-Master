@@ -6,8 +6,8 @@ fn main() {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon.ico");
         // Named version info: unsigned exes without it look more suspicious to antivirus heuristics.
-        res.set("ProductName", "ROM Master")
-            .set("FileDescription", "ROM Master: eboot.bin to ELF converter")
+        res.set("ProductName", "PKG Master")
+            .set("FileDescription", "PKG Master: eboot.bin to ELF converter")
             .set("CompanyName", "Guernica4u")
             .set("LegalCopyright", "MIT License, Guernica4u");
         if let Err(e) = res.compile() {

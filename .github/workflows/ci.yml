@@ -11,10 +11,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
+        app: [app, PS5toPC/app]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
-        working-directory: app
+        working-directory: ${{ matrix.app }}
     steps:
       - uses: actions/checkout@v4
       - name: Linux build dependencies
@@ -23,6 +24,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: app
+          workspaces: ${{ matrix.app }}
       - run: cargo build --release
       - run: cargo test

@@ -1,4 +1,4 @@
-//! Update check and "Update now": find a newer ROM Master release on GitHub,
+//! Update check and "Update now": find a newer PKG Master release on GitHub,
 //! download its zip (checked against GitHub's SHA-256) and swap the new
 //! programs in next to the running one.
 //!
@@ -16,18 +16,18 @@ use crate::convert::Progress;
 use crate::download::{download, latest_release, unzip, Asset, Release};
 use crate::error::{Error, Result};
 
-pub const REPO: &str = "Guernica4u/ROM-Master";
-pub const RELEASES: &str = "https://github.com/Guernica4u/ROM-Master/releases";
+pub const REPO: &str = "Guernica4u/PKG-Master";
+pub const RELEASES: &str = "https://github.com/Guernica4u/PKG-Master/releases";
 
 /// The files a release replaces, besides the running program itself.
 #[cfg(windows)]
-const COMPANIONS: [&str; 2] = ["rommaster-cli.exe", "README.txt"];
+const COMPANIONS: [&str; 2] = ["pkgmaster-cli.exe", "README.txt"];
 #[cfg(not(windows))]
-const COMPANIONS: [&str; 2] = ["rommaster-cli", "README.txt"];
+const COMPANIONS: [&str; 2] = ["pkgmaster-cli", "README.txt"];
 #[cfg(windows)]
-const GUI_EXE: &str = "rommaster-gui.exe";
+const GUI_EXE: &str = "pkgmaster-gui.exe";
 #[cfg(not(windows))]
-const GUI_EXE: &str = "rommaster-gui";
+const GUI_EXE: &str = "pkgmaster-gui";
 /// How each platform's release download ends.
 #[cfg(windows)]
 const ARCHIVE_SUFFIX: &str = "-windows-x64.zip";
@@ -54,7 +54,7 @@ pub fn running_appimage() -> bool {
 /// The asset "Update now" needs for how this copy was installed.
 fn update_asset(release: &Release) -> Option<&Asset> {
     let suffix = if running_appimage() { APPIMAGE_SUFFIX } else { ARCHIVE_SUFFIX };
-    release.asset("rom-master-", suffix)
+    release.asset("pkg-master-", suffix)
 }
 
 /// This build's version, e.g. `0.1.3`. Debug builds can pretend to be older
@@ -145,7 +145,7 @@ pub fn check() -> Result<Option<Release>> {
 /// the path of the new program, to start before this one exits.
 pub fn install(release: &Release, progress: Progress, cancel: &AtomicBool) -> Result<PathBuf> {
     let exe = program_path()?;
-    let dir = exe.parent().ok_or_else(|| Error::Conversion("can't tell which folder ROM Master is in".into()))?;
+    let dir = exe.parent().ok_or_else(|| Error::Conversion("can't tell which folder PKG Master is in".into()))?;
     let asset = update_asset(release)
         .ok_or_else(|| Error::Conversion(format!("release {} has no download for this system", release.tag)))?;
 
