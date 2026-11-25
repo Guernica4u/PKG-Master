@@ -1,6 +1,6 @@
 //! RPCS3, the PS3 emulator: "Download for me" fetches its official build
 //! (a .7z on Windows, an AppImage on Linux), and a check for the PS3 system
-//! software it needs. RPCS3 isn't shipped with ROM Master, and the system
+//! software it needs. RPCS3 isn't shipped with PKG Master, and the system
 //! software always comes from PlayStation's own site, installed by the user
 //! inside RPCS3.
 
@@ -20,7 +20,7 @@ pub const RPCS3_REPO: &str = "RPCS3/rpcs3-binaries-linux";
 pub const RPCS3_DOWNLOAD: &str = "https://rpcs3.net/download";
 /// PlayStation's page for the PS3 system software (PS3UPDAT.PUP), free for anyone.
 pub const PS3_SYSTEM_SOFTWARE: &str = "https://www.playstation.com/en-us/support/hardware/ps3/system-software/";
-/// The program ROM Master starts: rpcs3.exe, or the AppImage saved under this name.
+/// The program PKG Master starts: rpcs3.exe, or the AppImage saved under this name.
 #[cfg(windows)]
 pub const RPCS3_EXE: &str = "rpcs3.exe";
 #[cfg(not(windows))]

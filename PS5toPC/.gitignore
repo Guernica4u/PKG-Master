@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+*.pkg
+*.ffpkg
+*.elf
+out/
+app/target/
+.claude/
+shad/
+*.log
+.freebuff/

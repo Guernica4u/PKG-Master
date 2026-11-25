@@ -1,6 +1,6 @@
-//! Switch to PS5toPC, the PS5-only version of ROM Master: download its latest
+//! Switch to PS5toPC, the PS5-only version of PKG Master: download its latest
 //! release next to this app and carry the settings and Library over. The
-//! window then runs the normal uninstaller on ROM Master.
+//! window then runs the normal uninstaller on PKG Master.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,8 +13,8 @@ use crate::error::{Error, Result};
 use crate::library::Library;
 use crate::update::{find_file, program_path, running_appimage, untar};
 
-pub const REPO: &str = "Guernica4u/PS5toPC";
-pub const PAGE: &str = "https://github.com/Guernica4u/PS5toPC";
+pub const REPO: &str = "Guernica4u/PKG-Master";
+pub const PAGE: &str = "https://github.com/Guernica4u/PKG-Master/releases/latest";
 /// PS5toPC's folder names under %APPDATA% / ~/.config (Windows, Linux).
 pub const DIR_NAMES: (&str, &str) = ("PS5toPC", "ps5topc");
 #[cfg(windows)]
@@ -85,7 +85,7 @@ pub fn data_dir() -> Option<PathBuf> {
     app_user_dir(false, DIR_NAMES)
 }
 
-/// Copy the settings and the Library (with its icons) from ROM Master's data
+/// Copy the settings and the Library (with its icons) from PKG Master's data
 /// folder to `to`, unless PS5toPC already has settings of its own there.
 pub fn carry_over(settings_file: &Path, to: &Path) -> Result<()> {
     if to.join("settings.ini").exists() {
@@ -131,7 +131,7 @@ mod tests {
     fn carries_settings_and_library_over() {
         let root = std::env::temp_dir().join(format!("pkgmaster-switch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let (old, new) = (root.join("ROM Master"), root.join("PS5toPC"));
+        let (old, new) = (root.join("PKG Master"), root.join("PS5toPC"));
         fs::create_dir_all(old.join("library-icons")).unwrap();
         fs::write(old.join("settings.ini"), "anyps5_dir=C:\\AnyPS5\n").unwrap();
         let icon = old.join("library-icons").join("PPSA01234.png");

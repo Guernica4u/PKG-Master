@@ -1,4 +1,4 @@
-//! ROM Master: a small window for opening a PS4/PS5 package, converting its
+//! PKG Master: a small window for opening a PS4/PS5 package, converting its
 //! executable to ELF, extracting all of its files, or exporting a package or
 //! decrypted game folder for AnyPS5, and running a game folder through the
 //! user's own AnyPS5 relinker.
@@ -38,7 +38,7 @@ const BINARY_EXTS: [&str; 5] = ["bin", "self", "sprx", "prx", "elf"];
 fn main() -> eframe::Result {
     let settings = Settings::load(&settings_path());
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("ROM Master")
+        .with_title("PKG Master")
         .with_inner_size(settings.window_size.map(|(w, h)| [w, h]).unwrap_or([760.0, 560.0]))
         .with_min_inner_size([520.0, 400.0])
         .with_drag_and_drop(true)
@@ -52,7 +52,7 @@ fn main() -> eframe::Result {
     // A file passed on the command line (or dropped onto the .exe) opens at start.
     let initial = std::env::args_os().nth(1).map(PathBuf::from);
     eframe::run_native(
-        "ROM Master",
+        "PKG Master",
         options,
         Box::new(move |cc| {
             apply_theme(&cc.egui_ctx);
@@ -83,7 +83,7 @@ enum Msg {
     AnyPs5Installed(Result<(PathBuf, String), Error>),
     /// A newer AnyPS5 release than the installed one (its tag).
     AnyPs5UpdateFound(String),
-    /// A newer ROM Master is on GitHub.
+    /// A newer PKG Master is on GitHub.
     UpdateFound(Release),
     /// "Update now" finished: the new program to start, or why not.
     Updated(Result<PathBuf, Error>),
@@ -786,7 +786,7 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.set_max_width(480.0);
-                ui.label(format!("{} isn't included with ROM Master.", emu.name));
+                ui.label(format!("{} isn't included with PKG Master.", emu.name));
                 ui.add_space(6.0);
                 ui.label(RichText::new("Download for me").strong());
                 ui.weak(format!("Gets the official {} build into {}", emu.name, dest.display()));
@@ -1013,7 +1013,7 @@ impl App {
                         Ok(exe) => match std::process::Command::new(&exe).spawn() {
                             Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                             Err(e) => {
-                                self.status = Status::Ok(format!("Updated; start ROM Master again to use the new version ({e})."))
+                                self.status = Status::Ok(format!("Updated; start PKG Master again to use the new version ({e})."))
                             }
                         },
                         Err(e) => self.status = download_status(&e),
@@ -1069,7 +1069,7 @@ impl App {
                         }
                     }
                 }
-                Msg::UpToDate => self.status = Status::Ok("ROM Master is up to date.".into()),
+                Msg::UpToDate => self.status = Status::Ok("PKG Master is up to date.".into()),
                 Msg::SwitchReady(result) => {
                     self.busy = false;
                     self.cancellable = false;
@@ -1156,8 +1156,8 @@ impl App {
         let title = info.and_then(|i| i.title.clone());
         if title != self.shown_title {
             let text = match &title {
-                Some(t) => format!("ROM Master - {t}"),
-                None => "ROM Master".to_string(),
+                Some(t) => format!("PKG Master - {t}"),
+                None => "PKG Master".to_string(),
             };
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(text));
             self.shown_title = title;
@@ -1188,7 +1188,7 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.set_max_width(480.0);
-                ui.label("Run shadPKG (PS4) needs shadPKG.exe, which isn't included with ROM Master.");
+                ui.label("Run shadPKG (PS4) needs shadPKG.exe, which isn't included with PKG Master.");
                 ui.add_space(4.0);
                 ui.label("1. Download shadPKG.exe from its official GitHub releases:");
                 if ui.link(SHADPKG_RELEASES).clicked() {
@@ -1385,9 +1385,9 @@ impl App {
         });
     }
 
-    /// Look for a newer ROM Master in the background (skipped when
+    /// Look for a newer PKG Master in the background (skipped when
     /// `PKGMASTER_NO_UPDATE_CHECK` is set). A failed check is silent.
-    /// Look for newer ROM Master and AnyPS5 releases. `manual` (About's
+    /// Look for newer PKG Master and AnyPS5 releases. `manual` (About's
     /// Check for updates) also says when there is nothing newer.
     fn check_for_update(&self, ctx: &egui::Context, manual: bool) {
         if !manual && std::env::var_os("PKGMASTER_NO_UPDATE_CHECK").is_some() {
@@ -1452,7 +1452,7 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.set_max_width(480.0);
-                ui.label("Run in RPCS3 plays PS3 games with RPCS3, the PS3 emulator, which isn't included with ROM Master.");
+                ui.label("Run in RPCS3 plays PS3 games with RPCS3, the PS3 emulator, which isn't included with PKG Master.");
                 ui.add_space(6.0);
                 ui.label(RichText::new("Download for me").strong());
                 ui.weak(format!("Gets the official RPCS3 build (about 40 MB) into {}", dest.display()));
@@ -1690,7 +1690,7 @@ impl App {
         // Its own OS window, not one drawn inside the main window.
         let size = egui::vec2(480.0, 200.0);
         let mut builder = egui::ViewportBuilder::default()
-            .with_title("Welcome to ROM Master")
+            .with_title("Welcome to PKG Master")
             .with_inner_size(size)
             // Centered over the main window, which takes focus, so keep it in front.
             .with_window_level(egui::WindowLevel::AlwaysOnTop)
@@ -1716,7 +1716,7 @@ impl App {
                 ui.add_space(10.0);
                 readme_line(ui);
                 ui.add_space(10.0);
-                ui.label("To remove ROM Master, use Uninstall in the menu at the top right.");
+                ui.label("To remove PKG Master, use Uninstall in the menu at the top right.");
                 ui.label(RichText::new("Deleting the folder leaves settings and downloads behind.").color(Color32::from_rgb(0xE8, 0xB3, 0x2A)));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -1738,7 +1738,7 @@ impl App {
         }
     }
 
-    /// Start-up offer: PS5toPC does the PS5 part of ROM Master. It can't be
+    /// Start-up offer: PS5toPC does the PS5 part of PKG Master. It can't be
     /// dismissed for the first 5 seconds, so it gets read.
     fn switch_ui(&mut self, ctx: &egui::Context) {
         if !self.show_switch {
@@ -1775,7 +1775,7 @@ impl App {
                 ui.label(RichText::new("Only using this for PS5 or PS4 games?").strong());
                 ui.label("Press the button to swap to PS5toPC, the PS5/PS4-only version. It adds the KytyPS5 emulator and keeps your Library.");
                 ui.add_space(4.0);
-                ui.weak("Switch downloads PS5toPC, moves your settings and Library over, then uninstalls ROM Master. Your AnyPS5 folder stays.");
+                ui.weak("Switch downloads PS5toPC, moves your settings and Library over, then uninstalls PKG Master. Your AnyPS5 folder stays.");
                 if ui.link(switch::PAGE).clicked() {
                     open_url(switch::PAGE);
                 }
@@ -1786,7 +1786,7 @@ impl App {
                         .on_disabled_hover_text("Wait for the running job or game to finish first.")
                         .clicked();
                     let label = |text: &str| if wait > 0 { format!("{text} ({wait})") } else { text.to_string() };
-                    later |= ui.add_enabled(wait == 0, egui::Button::new(label("Keep ROM Master"))).clicked();
+                    later |= ui.add_enabled(wait == 0, egui::Button::new(label("Keep PKG Master"))).clicked();
                     never = ui.add_enabled(wait == 0, egui::Button::new(label("Don't ask again"))).clicked();
                 });
             });
@@ -1806,7 +1806,7 @@ impl App {
     }
 
     /// PS5toPC is downloaded: move the settings and Library over, start it,
-    /// then uninstall ROM Master (keeping the AnyPS5 and RPCS3 downloads).
+    /// then uninstall PKG Master (keeping the AnyPS5 and RPCS3 downloads).
     fn finish_switch(&mut self, ctx: &egui::Context, exe: &Path) {
         let moved = match switch::data_dir() {
             Some(to) => switch::carry_over(&settings_path(), &to),
@@ -1830,7 +1830,7 @@ impl App {
         uninstall::prune(&dirs);
         match uninstall::finish_after_exit(&left, &dirs) {
             Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            Err(e) => self.status = Status::Err(format!("PS5toPC started, but ROM Master could not finish removing itself: {e}")),
+            Err(e) => self.status = Status::Err(format!("PS5toPC started, but PKG Master could not finish removing itself: {e}")),
         }
     }
 
@@ -1839,13 +1839,13 @@ impl App {
         let busy = self.busy || self.game_running();
         let Some(items) = self.uninstall.as_mut() else { return };
         let (mut go, mut cancel) = (false, false);
-        egui::Window::new("Uninstall ROM Master")
+        egui::Window::new("Uninstall PKG Master")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.set_max_width(520.0);
-                ui.label("This deletes ROM Master and everything ticked below:");
+                ui.label("This deletes PKG Master and everything ticked below:");
                 ui.add_space(4.0);
                 egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                     for (item, on) in items.iter_mut() {
@@ -1859,7 +1859,7 @@ impl App {
                 ui.add_space(4.0);
                 ui.weak("Unticked downloads, like AnyPS5 with your games' run folders, are kept.");
                 if cfg!(windows) {
-                    ui.weak("Windows can't delete a running program: its folder opens at the end, so delete rommaster-gui.exe there.");
+                    ui.weak("Windows can't delete a running program: its folder opens at the end, so delete pkgmaster-gui.exe there.");
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -1882,7 +1882,7 @@ impl App {
             self.uninstall = None;
             match uninstall::finish_after_exit(&left, &dirs) {
                 Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                Err(e) => self.status = Status::Err(format!("ROM Master could not finish removing itself: {e}")),
+                Err(e) => self.status = Status::Err(format!("PKG Master could not finish removing itself: {e}")),
             }
         }
     }
@@ -1894,13 +1894,13 @@ impl App {
         }
         let mut open = true;
         let mut check = false;
-        egui::Window::new("About ROM Master")
+        egui::Window::new("About PKG Master")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(RichText::new(format!("ROM Master v{}", update::current_version())).size(18.0).strong());
+                ui.label(RichText::new(format!("PKG Master v{}", update::current_version())).size(18.0).strong());
                 ui.set_max_width(450.0);
                 ui.label(ABOUT_DESCRIPTION);
                 if ui.link(PROJECT_PAGE).clicked() {
@@ -1916,7 +1916,7 @@ impl App {
         self.show_about = open;
     }
 
-    /// "ROM Master vX is out", with Update now.
+    /// "PKG Master vX is out", with Update now.
     fn update_ui(&mut self, ctx: &egui::Context) {
         if !self.show_update {
             return;
@@ -1930,7 +1930,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_max_width(480.0);
                 ui.label(
-                    RichText::new(format!("ROM Master {} is out. You have v{}.", release.tag, update::current_version()))
+                    RichText::new(format!("PKG Master {} is out. You have v{}.", release.tag, update::current_version()))
                         .size(16.0)
                         .strong(),
                 );
@@ -1966,7 +1966,7 @@ impl App {
                 });
             });
         if now {
-            self.status = Status::Info(format!("Downloading ROM Master {}…", release.tag));
+            self.status = Status::Info(format!("Downloading PKG Master {}…", release.tag));
             self.spawn_download(ctx, move |progress, cancel| Msg::Updated(update::install(&release, progress, cancel)));
             self.show_update = false;
         } else if skip {
@@ -1992,7 +1992,7 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.set_max_width(500.0);
-                ui.label("Running PS5 games needs AnyPS5, which isn't included with ROM Master.");
+                ui.label("Running PS5 games needs AnyPS5, which isn't included with PKG Master.");
                 ui.add_space(4.0);
                 ui.label("1. From AnyPS5's GitHub releases, download prx-windows-v….zip and relinker-v….exe:");
                 if ui.link(ANYPS5_RELEASES).clicked() {
@@ -2003,7 +2003,7 @@ impl App {
                 ui.label("3. Drop relinker-v….exe into that folder.");
                 ui.label("4. Press \"I have it, pick the folder…\" and choose that folder.");
                 ui.add_space(8.0);
-                ui.label(RichText::new("Or let ROM Master do all of that:").strong());
+                ui.label(RichText::new("Or let PKG Master do all of that:").strong());
                 ui.weak(format!("Downloads the official release (about 90 MB) into {}", dest.display()));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -2075,7 +2075,7 @@ impl App {
                     ui.heading("History");
                     close = ui.small_button("Close").clicked();
                 });
-                ui.weak("Everything ROM Master wrote. Revert deletes it and puts back whatever was there before.");
+                ui.weak("Everything PKG Master wrote. Revert deletes it and puts back whatever was there before.");
                 ui.separator();
                 let Ok(h) = self.history.try_lock() else {
                     ui.weak("Busy…");
@@ -2355,7 +2355,7 @@ fn drop_zone(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         .show(ui, |ui| ui.vertical_centered(add));
 }
 
-const README_URL: &str = "https://github.com/Guernica4u/ROM-Master#readme";
+const README_URL: &str = "https://github.com/Guernica4u/PKG-Master#readme";
 
 /// An eboot.bin by file name (any folder, any case).
 fn is_eboot(path: &str) -> bool {
@@ -2433,7 +2433,7 @@ fn file_label(p: &Path) -> String {
 
 /// shadPKG's official releases, where users download shadPKG.exe themselves.
 const SHADPKG_RELEASES: &str = "https://github.com/seregonwar/ShadPKG/releases";
-/// The folder next to rommaster-gui.exe where shadPKG.exe goes.
+/// The folder next to pkgmaster-gui.exe where shadPKG.exe goes.
 const SHADPKG_DIR: &str = "shadpkg";
 #[cfg(windows)]
 const SHADPKG_NAMES: [&str; 2] = ["shadPKG.exe", "shadpkg.exe"];
@@ -2473,7 +2473,7 @@ fn find_shadpkg() -> Option<PathBuf> {
 
 use pkgmaster::rpcs3::{PS3_SYSTEM_SOFTWARE, RPCS3_DOWNLOAD};
 
-const PROJECT_PAGE: &str = "https://github.com/Guernica4u/ROM-Master";
+const PROJECT_PAGE: &str = "https://github.com/Guernica4u/PKG-Master";
 
 /// What About says: the GitHub repository description, word for word.
 const ABOUT_DESCRIPTION: &str = "A toolbox for your own game dumps: PS1 to PS5, PSP, PS Vita, GameCube, Wii and Xbox 360. Convert eboot.bin to ELF, decrypt PS4 packages with shadPKG, and play games in their emulators.";
@@ -2836,7 +2836,7 @@ impl eframe::App for App {
             // A slim row while a newer version is waiting.
             if let Some(tag) = self.update.as_ref().map(|r| r.tag.clone()) {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("ROM Master {tag} is out.")).color(Color32::from_rgb(0x2E, 0xA0, 0x43)));
+                    ui.label(RichText::new(format!("PKG Master {tag} is out.")).color(Color32::from_rgb(0x2E, 0xA0, 0x43)));
                     if ui.add_enabled(!self.busy, egui::Button::new("Update…").small()).clicked() {
                         self.show_update = true;
                     }
@@ -2883,7 +2883,7 @@ impl eframe::App for App {
                 }
                 if ui
                     .add(egui::SelectableLabel::new(self.show_history, RichText::new("History").size(16.0)))
-                    .on_hover_text("Everything ROM Master wrote, with Revert")
+                    .on_hover_text("Everything PKG Master wrote, with Revert")
                     .clicked()
                 {
                     self.show_history = !self.show_history;
@@ -2908,12 +2908,12 @@ impl eframe::App for App {
                             ui.close_menu();
                         }
                         ui.separator();
-                        if ui.button("About ROM Master").clicked() {
+                        if ui.button("About PKG Master").clicked() {
                             self.show_about = true;
                             ui.close_menu();
                         }
                         ui.separator();
-                        if ui.button("Uninstall ROM Master…").clicked() {
+                        if ui.button("Uninstall PKG Master…").clicked() {
                             let plan = uninstall::plan(&self.settings);
                             self.uninstall = Some(plan.into_iter().map(|i| { let on = !i.optional; (i, on) }).collect());
                             ui.close_menu();

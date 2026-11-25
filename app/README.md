@@ -1,11 +1,11 @@
-# ROM Master desktop app
+# PKG Master desktop app
 
-The Rust source of the ROM Master window app (`rommaster-gui.exe`) and its
-small command-line companion (`rommaster-cli.exe`). See the
+The Rust source of the PKG Master window app (`pkgmaster-gui.exe`) and its
+small command-line companion (`pkgmaster-cli.exe`). See the
 [main README](../README.md) for what it does and how to use it.
 
 ```bash
-cargo build --release   # target/release/rommaster-gui.exe, rommaster-cli.exe
+cargo build --release   # target/release/pkgmaster-gui.exe, pkgmaster-cli.exe
 cargo test
 ```
 
@@ -21,7 +21,7 @@ cargo test
 | `src/history.rs` | the History record, backups and Revert |
 | `src/pkg.rs`, `src/pfs.rs`, `src/crypto.rs` | PS4/PS5 containers, the PFS filesystem, XTS decryption |
 | `src/elf.rs` | ELF parsing and SELF → ELF rebuilding |
-| `src/bin/cli.rs` | `rommaster-cli` |
+| `src/bin/cli.rs` | `pkgmaster-cli` |
 | `assets/icon.png`, `assets/icon.ico`, `build.rs` | the app icon (window and .exe) |
 | `src/console.rs` | telling PS1/PS2/PSP/Vita/GameCube/Wii/Xbox 360 games apart |
 | `src/emulators.rs` | shadPS4, Xenia, Dolphin, PCSX2, DuckStation, PPSSPP and Vita3K: Download for me |

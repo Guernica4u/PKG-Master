@@ -133,7 +133,7 @@ pub struct Settings {
     pub rpcs3: Option<PathBuf>,
     /// The other emulators the user set up, by `emulators::Emu::id`.
     pub emus: std::collections::BTreeMap<String, PathBuf>,
-    /// A ROM Master release the user chose to skip, such as `v0.1.4`.
+    /// A PKG Master release the user chose to skip, such as `v0.1.4`.
     pub skip_version: Option<String>,
     /// Clicking a Library game also starts it (AnyPS5 or RPCS3).
     pub library_autostart: bool,
@@ -191,7 +191,7 @@ impl Settings {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let mut lines = vec!["# ROM Master settings".to_string()];
+        let mut lines = vec!["# PKG Master settings".to_string()];
         let mut put = |key: &str, value: Option<String>| {
             if let Some(v) = value {
                 lines.push(format!("{key}={v}"));
@@ -469,7 +469,7 @@ impl Preflight {
         if !self.has_param_json {
             w.push(
                 "sce_sys/param.json is missing (PS4 dumps only have param.sfo). AnyPS5 reads the title ID \
-                 and name from it, so metadata calls may fail. ROM Master will not make one up."
+                 and name from it, so metadata calls may fail. PKG Master will not make one up."
                     .into(),
             );
         }
