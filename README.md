@@ -4,10 +4,6 @@ A toolbox for game files you dumped yourself. One app for PS1 to PS5, PSP,
 PS Vita, GameCube, Wii and Xbox 360: open packages, turn `eboot.bin` into a
 normal ELF, and play games in the right emulator.
 
-> **Only here for PS5 or PS4 games?** Grab the `PS5toPC` download from the
-> same release instead. It's the PS5/PS4 part of this app, plus KytyPS5. PKG
-> Master offers to swap you over when it starts. Its source is in [PS5toPC/](PS5toPC).
-
 **[Download](https://github.com/Guernica4u/PKG-Master/releases/latest)** and
 run it. Nothing to install.
 
@@ -23,7 +19,7 @@ Drop it on the window, or pick your games folder and use the Library:
 | File | What you get |
 | --- | --- |
 | `eboot.bin` | Convert to ELF |
-| PS5 game folder | Run in AnyPS5, then Launch |
+| PS5 game folder | Run in AnyPS5, then Launch, or Run in KytyPS5 |
 | PS4 game folder | Run in shadPS4 |
 | PS4 `.pkg` | Run shadPKG to decrypt and extract it |
 | Fake / debug `.pkg` | Type its passcode (often 32 zeros), then convert or extract |
@@ -51,12 +47,12 @@ the free [PS3 system software](https://www.playstation.com/en-us/support/hardwar
 - **Windows says it's a virus?** It's a false alarm because the app is new and
   unsigned. In Windows Security, open **Protection history** and pick **Allow**.
 - **Command line:** `pkgmaster-cli convert eboot.bin eboot.elf`, or drop a file on `pkgmaster-cli.exe`.
-- **Was called ROM Master for a while.** Those installs update to PKG Master on their own.
+- **Used PS5toPC or ROM Master?** Those were other names for this app. Grab PKG Master from the releases; it does everything they did.
 
 ## Build
 
 ```bash
-cd app            # or PS5toPC/app
+cd app
 cargo build --release
 cargo test
 ```

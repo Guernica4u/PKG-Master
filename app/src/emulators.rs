@@ -44,8 +44,19 @@ pub const SHADPS4: Emu = Emu {
     args: &["-g"],
 };
 
-pub const ALL: [Emu; 7] = [
+pub const KYTY: Emu = Emu {
+    id: "kyty",
+    name: "KytyPS5",
+    consoles: &[],
+    page: "https://github.com/KytyPS5/KytyPS5/releases",
+    source: Source::GitHub("KytyPS5/KytyPS5", Some(("", "-windows-x64.zip")), Some(("", "-linux-x86_64.tar.gz"))),
+    exe: &["kyty_emulator.exe", "kyty_emulator"],
+    args: &["--game"],
+};
+
+pub const ALL: [Emu; 8] = [
     SHADPS4,
+    KYTY,
     Emu {
         id: "xenia",
         name: "Xenia Canary",
@@ -220,6 +231,7 @@ mod tests {
             ("duckstation", "duckstation-qt-x64-ReleaseLTCG.exe"),
             ("pcsx2", "pcsx2-qt.exe"),
             ("ppsspp", "PPSSPPWindows64.exe"),
+            ("kyty", "KytyPS5/kyty_emulator.exe"),
         ] {
             let p = dir.join(emu).join(file);
             fs::create_dir_all(p.parent().unwrap()).unwrap();

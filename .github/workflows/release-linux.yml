@@ -31,12 +31,12 @@ jobs:
       - name: Build and package
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
-        run: sh app/package-linux.sh && sh PS5toPC/app/package-linux.sh
+        run: sh app/package-linux.sh
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          for d in app/dist PS5toPC/app/dist; do
-            (cd $d && sha256sum *-linux-x64.tar.gz *-x86_64.AppImage && gh release upload "$TAG" *-linux-x64.tar.gz *-x86_64.AppImage --clobber)
-          done
+          cd app/dist
+          for f in *-linux-x64.tar.gz *-x86_64.AppImage; do sha256sum "$f"; done
+          gh release upload "$TAG" *-linux-x64.tar.gz *-x86_64.AppImage --clobber
