@@ -29,7 +29,7 @@ use pkgmaster::history::{ago, History};
 use pkgmaster::library::{Entry, Library};
 use pkgmaster::media::Music;
 use pkgmaster::emulators::{self, Emu};
-use pkgmaster::{switch, uninstall, update};
+use pkgmaster::{uninstall, update};
 use pkgmaster::Error;
 
 const PACKAGE_EXTS: [&str; 1] = ["pkg"];
@@ -100,8 +100,6 @@ enum Msg {
     EmuInstalled(&'static Emu, Result<PathBuf, Error>),
     /// Check for updates found nothing newer.
     UpToDate,
-    /// Switch to PS5toPC: it's downloaded (its program), or why not.
-    SwitchReady(Result<PathBuf, Error>),
 }
 
 /// How a launched game (or RPCS3) ended.
@@ -117,9 +115,6 @@ struct GameEnd {
     /// Started from an AnyPS5 run folder.
     anyps5: bool,
 }
-
-/// The switch offer can't be dismissed for this long.
-const SWITCH_WAIT_SECS: f64 = 5.0;
 
 /// A failure that soon after Launch counts as a crash on boot.
 const BOOT_CRASH_SECS: f64 = 15.0;
@@ -168,9 +163,6 @@ struct App {
     show_about: bool,
     /// The start-up tip to uninstall from the menu, until "Never show again".
     show_uninstall_tip: bool,
-    /// The start-up offer to switch to PS5toPC, and when it first showed (egui time).
-    show_switch: bool,
-    switch_shown_at: Option<f64>,
     /// ☰ > Uninstall: what would be deleted, and whether each is ticked.
     uninstall: Option<Vec<(uninstall::Item, bool)>>,
     /// Explain how to install the PS3 system software in RPCS3.
@@ -282,8 +274,6 @@ impl App {
             tx,
             rx,
             show_uninstall_tip: !settings.hide_uninstall_tip,
-            show_switch: !settings.hide_switch_offer,
-            switch_shown_at: None,
             settings,
             confirm: None,
             log: Vec::new(),
@@ -880,6 +870,8 @@ impl App {
             self.run_rpcs3(ctx, &e.path);
         } else if self.open_game_run_dir().is_some() {
             self.launch(ctx);
+        } else if is_ps5_folder(&e.path) && find_emu(&self.settings, &emulators::KYTY).is_some() {
+            self.run_emu(ctx, &emulators::KYTY, &e.path);
         }
     }
 
@@ -1070,15 +1062,6 @@ impl App {
                     }
                 }
                 Msg::UpToDate => self.status = Status::Ok("PKG Master is up to date.".into()),
-                Msg::SwitchReady(result) => {
-                    self.busy = false;
-                    self.cancellable = false;
-                    self.progress = None;
-                    match result {
-                        Ok(exe) => self.finish_switch(ctx, &exe),
-                        Err(e) => self.status = download_status(&e),
-                    }
-                }
                 Msg::EmuInstalled(emu, result) => {
                     self.busy = false;
                     self.cancellable = false;
@@ -1684,7 +1667,7 @@ impl App {
 
     /// Start-up popup: remove the app with the built-in uninstaller.
     fn uninstall_tip_ui(&mut self, ctx: &egui::Context) {
-        if !self.show_uninstall_tip || self.show_switch {
+        if !self.show_uninstall_tip {
             return;
         }
         // Its own OS window, not one drawn inside the main window.
@@ -1735,102 +1718,6 @@ impl App {
         }
         if ok || never {
             self.show_uninstall_tip = false;
-        }
-    }
-
-    /// Start-up offer: PS5toPC does the PS5 part of PKG Master. It can't be
-    /// dismissed for the first 5 seconds, so it gets read.
-    fn switch_ui(&mut self, ctx: &egui::Context) {
-        if !self.show_switch {
-            return;
-        }
-        let now = ctx.input(|i| i.time);
-        let wait = (SWITCH_WAIT_SECS - (now - *self.switch_shown_at.get_or_insert(now))).ceil().max(0.0) as u32;
-        if wait > 0 {
-            ctx.request_repaint_after(Duration::from_millis(200));
-        }
-        let can_switch = !self.busy && !self.game_running();
-        let size = egui::vec2(470.0, 190.0);
-        let mut builder = egui::ViewportBuilder::default()
-            .with_title("Try PS5toPC")
-            .with_inner_size(size)
-            .with_window_level(egui::WindowLevel::AlwaysOnTop)
-            .with_resizable(false)
-            .with_minimize_button(false)
-            .with_maximize_button(false);
-        if let Some(main) = ctx.input(|i| i.viewport().outer_rect) {
-            builder = builder.with_position(main.center() - size / 2.0);
-        }
-        let (switch, later, never) = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("switch_offer"), builder, |ctx, _| {
-            let mut later = false;
-            if ctx.input(|i| i.viewport().close_requested()) {
-                if wait > 0 {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                } else {
-                    later = true;
-                }
-            }
-            let (mut switch, mut never) = (false, false);
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.label(RichText::new("Only using this for PS5 or PS4 games?").strong());
-                ui.label("Press the button to swap to PS5toPC, the PS5/PS4-only version. It adds the KytyPS5 emulator and keeps your Library.");
-                ui.add_space(4.0);
-                ui.weak("Switch downloads PS5toPC, moves your settings and Library over, then uninstalls PKG Master. Your AnyPS5 folder stays.");
-                if ui.link(switch::PAGE).clicked() {
-                    open_url(switch::PAGE);
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    switch = ui
-                        .add_enabled(can_switch, egui::Button::new(RichText::new("Switch to PS5toPC").strong()))
-                        .on_disabled_hover_text("Wait for the running job or game to finish first.")
-                        .clicked();
-                    let label = |text: &str| if wait > 0 { format!("{text} ({wait})") } else { text.to_string() };
-                    later |= ui.add_enabled(wait == 0, egui::Button::new(label("Keep PKG Master"))).clicked();
-                    never = ui.add_enabled(wait == 0, egui::Button::new(label("Don't ask again"))).clicked();
-                });
-            });
-            (switch, later, never)
-        });
-        if never {
-            self.settings.hide_switch_offer = true;
-            let _ = self.settings.save(&settings_path());
-        }
-        if switch {
-            self.status = Status::Info("Downloading PS5toPC from GitHub…".into());
-            self.spawn_download(ctx, move |progress, cancel| Msg::SwitchReady(switch::install(progress, cancel)));
-        }
-        if switch || later || never {
-            self.show_switch = false;
-        }
-    }
-
-    /// PS5toPC is downloaded: move the settings and Library over, start it,
-    /// then uninstall PKG Master (keeping the AnyPS5 and RPCS3 downloads).
-    fn finish_switch(&mut self, ctx: &egui::Context, exe: &Path) {
-        let moved = match switch::data_dir() {
-            Some(to) => switch::carry_over(&settings_path(), &to),
-            None => Ok(()),
-        };
-        if let Err(e) = moved {
-            self.status = Status::Err(format!("PS5toPC is in {}, but your settings could not be moved: {}", exe.display(), describe_error(&e)));
-            return;
-        }
-        let mut cmd = std::process::Command::new(exe);
-        if let Some(dir) = exe.parent() {
-            cmd.current_dir(dir);
-        }
-        if let Err(e) = cmd.spawn() {
-            self.status = Status::Err(format!("PS5toPC is in {}, but it failed to start: {e}", exe.display()));
-            return;
-        }
-        let required: Vec<PathBuf> = uninstall::plan(&self.settings).into_iter().filter(|i| !i.optional).map(|i| i.path).collect();
-        let left = uninstall::remove(&required);
-        let dirs = uninstall::folders();
-        uninstall::prune(&dirs);
-        match uninstall::finish_after_exit(&left, &dirs) {
-            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            Err(e) => self.status = Status::Err(format!("PS5toPC started, but PKG Master could not finish removing itself: {e}")),
         }
     }
 
@@ -2479,6 +2366,11 @@ const PROJECT_PAGE: &str = "https://github.com/Guernica4u/PKG-Master";
 const ABOUT_DESCRIPTION: &str = "A toolbox for your own game dumps: PS1 to PS5, PSP, PS Vita, GameCube, Wii and Xbox 360. Convert eboot.bin to ELF, decrypt PS4 packages with shadPKG, and play games in their emulators.";
 
 /// The emulator the user set up for `emu`, if it's still there.
+/// A decrypted PS5 game folder (KytyPS5 boots these).
+fn is_ps5_folder(path: &Path) -> bool {
+    path.join("sce_sys/param.json").is_file()
+}
+
 fn find_emu(settings: &Settings, emu: &Emu) -> Option<PathBuf> {
     settings.emus.get(emu.id).filter(|p| p.is_file()).cloned()
 }
@@ -2943,7 +2835,6 @@ impl eframe::App for App {
         self.settings_ui(ctx);
         self.about_ui(ctx);
         self.uninstall_ui(ctx);
-        self.switch_ui(ctx);
         self.uninstall_tip_ui(ctx);
         self.update_ui(ctx);
 
@@ -3107,9 +2998,11 @@ impl eframe::App for App {
                     }
                 });
             }
-            // Other consoles' games, and PS4 game folders in shadPS4.
+            // Other consoles' games, PS4 game folders in shadPS4, PS5 ones in KytyPS5.
             let emu: Option<&'static Emu> = if self.is_ps4 && is_folder {
                 emulators::by_id("shadps4")
+            } else if is_folder && self.path.as_deref().is_some_and(is_ps5_folder) {
+                Some(&emulators::KYTY)
             } else {
                 loaded.rows.iter().find(|(k, _)| k == "Console").and_then(|(_, v)| {
                     emulators::ALL.iter().find(|e| e.consoles.iter().any(|c| c.name() == v.as_str()))

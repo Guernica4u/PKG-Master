@@ -33,9 +33,6 @@ Run ./pkgmaster-gui. Nothing to install.
 
 Drop a game or file on the window. The README says what each kind does.
 
-Only using it for PS5 or PS4 games? Try PS5toPC instead:
-It comes in the same release: PS5toPC-v$version-...
-
 To remove it, use Menu > Uninstall. Deleting the folder leaves your
 settings and downloads behind.
 

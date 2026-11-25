@@ -145,8 +145,6 @@ pub struct Settings {
     pub hide_log: bool,
     /// "Never show again" on the start-up uninstall tip.
     pub hide_uninstall_tip: bool,
-    /// "Don't ask again" on the start-up offer to switch to PS5toPC.
-    pub hide_switch_offer: bool,
     /// The main window's outer position in points, saved when it closes.
     pub window_pos: Option<(f32, f32)>,
     /// The main window's inner size in points, saved when it closes.
@@ -177,7 +175,6 @@ impl Settings {
                 "mute_music" => s.mute_music = v == "1",
                 "hide_log" => s.hide_log = v == "1",
                 "hide_uninstall_tip" => s.hide_uninstall_tip = v == "1",
-                "hide_switch_offer" => s.hide_switch_offer = v == "1",
                 "skip_version" => s.skip_version = Some(v.to_string()),
                 "window_pos" => s.window_pos = parse_pair(v),
                 "window_size" => s.window_size = parse_pair(v),
@@ -210,7 +207,6 @@ impl Settings {
         put("mute_music", self.mute_music.then(|| "1".to_string()));
         put("hide_log", self.hide_log.then(|| "1".to_string()));
         put("hide_uninstall_tip", self.hide_uninstall_tip.then(|| "1".to_string()));
-        put("hide_switch_offer", self.hide_switch_offer.then(|| "1".to_string()));
         put("window_pos", self.window_pos.map(|(x, y)| format!("{x},{y}")));
         put("window_size", self.window_size.map(|(w, h)| format!("{w},{h}")));
         lines.push(String::new());
